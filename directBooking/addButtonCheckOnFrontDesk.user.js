@@ -17,8 +17,26 @@
 
 (function() {
     'use strict';
-
-    const textButton = "Ver datos de la reserva en Front Desk y revisar devoluciones"; // Replace with your desired button text in your language
+    
+    // Function to get language code from meta tag
+    function getLanguageCode() {
+        const metaLocale = document.querySelector('meta[name="locale"]');
+        if (metaLocale) {
+            return metaLocale.getAttribute('content') || 'en';
+        }
+        return 'en'; // Default to English if meta tag not found
+    }
+    
+    // Translations for button text
+    const translations = {
+        'en': "View reservation data in Front Desk and check refunds",
+        'es': "Ver datos de la reserva en Front Desk y revisar devoluciones"
+        // Add more languages as needed
+    };
+    
+    // Get current language and set button text
+    const languageCode = getLanguageCode();
+    const textButton = translations[languageCode] || translations['en']; // Fallback to English
 
     let idPropertyFrontDesk = 12345;
     const el = document.querySelector('li.el-dropdown-menu__item.app-switcher-item a');
