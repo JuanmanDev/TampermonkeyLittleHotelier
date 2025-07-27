@@ -4,7 +4,7 @@
 // @version      1.0.0
 // @description  Compacts the UI for reservation details and makes the comments section taller
 // @author       JuanmanDev
-// @match        https://app.littlehotelier.com/*house_keeping*
+// @match        https://app.littlehotelier.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=littlehotelier.com
 // @grant        none
 
@@ -41,13 +41,6 @@
       document.head.appendChild(styleSheet);
     }
 
-    function ejecutar() {
-        if (window.location.pathname.includes("house_keeping")) {
-            compactUIReservationDetails();
-            setTimeout(compactUIReservationDetails, 5000);
-        }
-    }
-
-    window.onload = ejecutar;
-    if (document.readyState === "complete") ejecutar();
+    window.onload = compactUIReservationDetails;
+    if (document.readyState === "complete") compactUIReservationDetails();
 })();
