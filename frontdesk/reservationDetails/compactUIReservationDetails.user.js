@@ -41,6 +41,6 @@
       document.head.appendChild(styleSheet);
     }
 
-    window.onload = compactUIReservationDetails;
+    window.addEventListener("load", compactUIReservationDetails);
     if (document.readyState === "complete") compactUIReservationDetails();
 })();

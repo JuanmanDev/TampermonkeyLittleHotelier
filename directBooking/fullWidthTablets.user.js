@@ -32,6 +32,6 @@
     }
 
 
-    window.onload = fullWidthTablaReservas;
+    window.addEventListener("load", fullWidthTablaReservas);
     if (document.readyState === "complete") { fullWidthTablaReservas();}
 })();

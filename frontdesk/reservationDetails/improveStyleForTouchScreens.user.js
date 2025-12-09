@@ -38,6 +38,6 @@
         improveStyleForTouchScreens();
     }
 
-    window.onload = ejecutar;
+    window.addEventListener("load", ejecutar);
     if (document.readyState === "complete") ejecutar();
 })();

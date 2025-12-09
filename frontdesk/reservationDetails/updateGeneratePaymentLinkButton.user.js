@@ -16,6 +16,14 @@
 
 (function() {
     'use strict';
+    
+    // Translations for button text
+    const translations = {
+        'es': "Cobrar con tarjeta por correo electronico (Email)",
+        'en': "Generate Payment Link",
+    };
+
+    const textButton = translations[window.currentLocale] || translations.en;
 
     function updateGeneratePaymentLinkButton() {
       /* Update the payment link with a better text and the phone number from the input field */
@@ -30,7 +38,7 @@
             url.searchParams.set("phone", phoneNumber);
             paymentButton.setAttribute('href', url.toString());
           }
-          paymentButton.innerText = "Cobrar con tarjeta por correo electronico (Email)";
+          paymentButton.innerText = textButton;
         }
       }
 
@@ -50,10 +58,6 @@
       observer.observe(targetNode, { childList: true, subtree: true });
     }
 
-    function ejecutar() {
-        updateGeneratePaymentLinkButton();
-    }
-
-    window.onload = ejecutar;
-    if (document.readyState === "complete") ejecutar();
+    window.addEventListener("load", updateGeneratePaymentLinkButton);
+    if (document.readyState === "complete") updateGeneratePaymentLinkButton();
 })();

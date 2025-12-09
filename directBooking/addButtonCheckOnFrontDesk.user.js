@@ -36,7 +36,7 @@
     
     // Get current language and set button text
     const languageCode = getLanguageCode();
-    const textButton = translations[languageCode] || translations['en']; // Fallback to English
+    const textButton = translations[languageCode] || translations.en; // Fallback to English
 
     let idPropertyFrontDesk = 12345;
     const el = document.querySelector('li.el-dropdown-menu__item.app-switcher-item a');

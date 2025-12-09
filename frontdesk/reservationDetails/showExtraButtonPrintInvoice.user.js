@@ -17,17 +17,31 @@
 (function() {
     'use strict';
 
+    // Translations for button text
+    const translations = {
+        'es': "Imprimir Factura",
+        'en': "Print Invoice",
+    };
+
+    const textButton = translations[window.currentLocale] || translations.en;
+
+
     function showExtraButtonPrintInvoice() {
       // Find the original element
       const originalElement = document.querySelector('a.btn.btn-sm.pull-right.text-blue[data-ref="print"]');
 
       if (originalElement) {
+        if (originalElement.parentNode.innerHTML.includes(textButton)) {
+          // If the element already exists, do not create a new one
+          return;
+        }
+
         // Clone the original element
         const newElement = originalElement.cloneNode(true);
 
         // Modify the new element's properties
         newElement.querySelector('.fa-caret-down').remove(); // Remove the caret icon
-        newElement.innerHTML = `<i class="fa fa-file" data-ref="print"></i> Imprimir Factura`; // Update the icon and text content
+        newElement.innerHTML = `<i class="fa fa-file" data-ref="print"></i> ${textButton}`; // Update the icon and text content
 
         // Attach the click event to trigger the other element's click
         newElement.addEventListener('click', () => {
@@ -43,9 +57,12 @@
     }
 
     function ejecutar() {
+        setTimeout(showExtraButtonPrintInvoice, 500);
         setTimeout(showExtraButtonPrintInvoice, 1500);
+        setTimeout(showExtraButtonPrintInvoice, 2500);
+        setTimeout(showExtraButtonPrintInvoice, 5000);
     }
 
-    window.onload = ejecutar;
+    window.addEventListener("load", ejecutar);
     if (document.readyState === "complete") ejecutar();
 })();
