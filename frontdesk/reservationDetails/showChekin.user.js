@@ -479,10 +479,27 @@ function run() {
         };
 
         const findMatchingGuestForm = (guest) => {
-            const forms = Array.from(document.querySelectorAll('.guest-form'));
             const normGuestFirst = normalizeString(guest.first_name);
             const normGuestLast = normalizeString(guest.last_name + ' ' + (guest.second_surname || '')).trim();
 
+            const primaryForm = document.querySelector('.primary-contact-panel');
+            if (primaryForm) {
+                const fnameInput = primaryForm.querySelector('#guest_first_name');
+                const lnameInput = primaryForm.querySelector('#guest_last_name');
+                if (fnameInput && lnameInput) {
+                    const normFName = normalizeString(fnameInput.value);
+                    const normLName = normalizeString(lnameInput.value);
+                    if (normFName && normLName) {
+                        const isMatchFirst = normFName.includes(normGuestFirst) || normGuestFirst.includes(normFName);
+                        const isMatchLast = normLName.includes(normalizeString(guest.last_name)) || normalizeString(guest.last_name).includes(normLName);
+                        if (isMatchFirst && isMatchLast) {
+                            return primaryForm;
+                        }
+                    }
+                }
+            }
+
+            const forms = Array.from(document.querySelectorAll('.guest-form'));
             for (const form of forms) {
                 const fNameInput = form.querySelector('input[name="first_name"]');
                 const lNameInput = form.querySelector('input[name="last_name"]');
@@ -611,28 +628,28 @@ function run() {
             }
 
             const fieldMapping = [
-                { name: 'first_name', val: guest.first_name },
-                { name: 'last_name', val: guest.last_name },
+                { name: 'first_name', id: 'guest_first_name', val: guest.first_name },
+                { name: 'last_name', id: 'guest_last_name', val: guest.last_name },
                 { name: 'second_surname', val: guest.second_surname },
-                { name: 'email', val: guest.email },
-                { name: 'phone_number', val: guest.phone },
+                { name: 'email', id: 'guest_email', val: guest.email },
+                { name: 'phone_number', id: 'guest_phone_number', val: guest.phone },
                 { name: 'gender', val: guest.gender },
-                { name: 'id_document_type', val: mapDocType(guest.document_type_raw) },
-                { name: 'id_number', val: guest.document_number },
-                { name: 'nationality', val: guest.nationality },
-                { name: 'date_of_issue', val: guest.date_of_issue },
-                { name: 'expiry_date', val: guest.expiry_date },
-                { name: 'date_of_birth', val: guest.date_of_birth },
-                { name: 'address', val: guest.address },
-                { name: 'country', val: guest.country },
-                { name: 'city', val: guest.city },
-                { name: 'state', val: guest.province },
-                { name: 'post_code', val: guest.post_code }
+                { name: 'id_document_type', id: 'guest_id_document_type', val: mapDocType(guest.document_type_raw) },
+                { name: 'id_number', id: 'guest_id_number', val: guest.document_number },
+                { name: 'nationality', id: 'guest_nationality', val: guest.nationality },
+                { name: 'date_of_issue', id: 'guest_date_of_issue', val: guest.date_of_issue },
+                { name: 'expiry_date', id: 'guest_expiry_date', val: guest.expiry_date },
+                { name: 'date_of_birth', id: 'guest_date_of_birth', val: guest.date_of_birth },
+                { name: 'address', id: 'guest_address', val: guest.address },
+                { name: 'country', id: 'guest_country', val: guest.country },
+                { name: 'city', id: 'guest_city', val: guest.city },
+                { name: 'state', id: 'guest_state', val: guest.province },
+                { name: 'post_code', id: 'guest_post_code', val: guest.post_code }
             ];
 
             for (const field of fieldMapping) {
                 if (!field.val) continue;
-                const input = targetForm.querySelector(`input[name="${field.name}"], select[name="${field.name}"]`);
+                let input = targetForm.querySelector(`input[name="${field.name}"], select[name="${field.name}"], input[id="${field.id}"], select[id="${field.id}"]`);
                 if (input) {
                     triggerVueUpdate(input, field.val);
                 }

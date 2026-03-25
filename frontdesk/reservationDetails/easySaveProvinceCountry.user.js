@@ -187,12 +187,27 @@
                 const selectedValue = e.target.textContent;
                 if (currentTargetInput) {
 
+                    // Guardamos referencia antes de que hidePopover() la borre
+                    const savedInput = currentTargetInput;
+
                     // ✔ Actualización Forzada de Vue (para que lo marque como DIRTY)
-                    triggerVueUpdate(currentTargetInput, selectedValue);
+                    triggerVueUpdate(savedInput, selectedValue);
+
+                    // Buscar el contenedor del formulario (huésped secundario o contacto principal)
+                    // Para el form principal: #guest_state está fuera de .primary-contact-panel
+                    // pero dentro de .contacts-totals-panel junto con #guest_country
+                    const guestForm = savedInput.closest('.guest-form') || savedInput.closest('.contacts-totals-panel') || savedInput.closest('.primary-contact-panel') || document.body;
 
                     // Rellenar vacíos con "_" asegurando que Vue registre el cambio
-                    const guestForm = currentTargetInput.closest('.guest-form') || document.body;
-                    const nameInputs = guestForm.querySelectorAll('input[name="first_name"], input[name="last_name"]');
+                    // Soportamos name="first_name" (secundarios) e id="guest_first_name" (principal)
+                    const nameSelectors = [
+                        'input[name="first_name"]', 
+                        'input[name="last_name"]',
+                        'input[id="guest_first_name"]',
+                        'input[id="guest_last_name"]'
+                    ];
+                    const nameInputs = guestForm.querySelectorAll(nameSelectors.join(','));
+                    
                     nameInputs.forEach(input => {
                         if (input.value.trim() === '') {
                             // ✔ Usamos el mismo hack superior de Vue para validar estos inputs
@@ -201,16 +216,18 @@
                     });
 
                     // Cambiar a España asegurando validación
-                    let container = currentTargetInput.parentElement;
-                    let countrySelect = null;
-                    while (container && container !== document.body) {
-                        countrySelect = container.querySelector('select[name="country"], select[id="guest_country"]');
-                        if (countrySelect) break;
-                        container = container.parentElement;
-                    }
+                    // Buscamos el select de país dentro del mismo contenedor
+                    const countrySelect = guestForm.querySelector('select[name="country"], select[id="guest_country"]');
                     if (countrySelect) {
                         triggerVueUpdate(countrySelect, 'Spain');
                     }
+
+                    // ✔ Re-aplicar provincia tras un breve delay para sobrevivir al
+                    // re-render de Vue provocado al cambiar país/nombres
+                    setTimeout(() => {
+                        triggerVueUpdate(savedInput, selectedValue);
+                        savedInput.blur();
+                    }, 50);
 
                 }
                 hidePopover();
@@ -277,14 +294,7 @@
         const filtered = provinces.filter(p => !filterText || p.toLowerCase().includes(filterText.toLowerCase()));
 
         if (filtered.length === 0) {
-            popover.style.display = 'block';
-            const empty = document.createElement('div');
-            empty.textContent = 'Sin resultados';
-            empty.style.padding = '10px';
-            empty.style.color = '#777';
-            empty.style.textAlign = 'center';
-            empty.style.fontFamily = 'Lato, sans-serif';
-            popover.appendChild(empty);
+            hidePopover();
             return;
         }
 
