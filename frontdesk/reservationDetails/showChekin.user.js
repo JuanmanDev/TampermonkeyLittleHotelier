@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      0.1.1
-// @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception
+// @version      1.0.0
+// @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception and be able to load Checkin guest data into Little Hotelier reservation form.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
 // @match        https://dashboard.chekin.com/bookings?autosearch=true*
@@ -28,7 +28,7 @@ function run() {
     const CONFIG = {
         LH_DOMAINS: ['app.littlehotelier.com'],
         CHEKIN_DOMAIN: 'dashboard.chekin.com',
-        STORAGE_PREFIX: 'lh_chekin_cache_',
+        STORAGE_PREFIX: 'lh_chekin_cache_v2_',
         CACHE_DURATION: 1000 * 60 * 60 * 24 // 24 hours
     };
 
@@ -41,6 +41,11 @@ function run() {
             found: 'Found',
             guests: 'guest(s)',
             viewInChekin: 'View in Chekin',
+            fillGuestBtn: 'Save Guest',
+            fillAllGuestsBtn: 'Save All Guests',
+            improveGuestBtn: 'Improve Data',
+            guestSavedBtn: 'Saved',
+            allGuestsSavedBtn: 'All checkin guests loaded',
             noGuestsYet: '⚠️ No guests registered yet.',
             noMatch: '❌ No matching reservation found in Chekin.',
             error: '❌ Error or No Data found.',
@@ -48,6 +53,9 @@ function run() {
             name: 'Name',
             documentId: 'Document ID',
             phone: 'Phone',
+            city: 'City',
+            province: 'Province',
+            country: 'Country',
             useAsPrimary: 'Use as Primary',
             guestRegistrationForm: 'Guest Registration Form:',
             open: 'Open',
@@ -67,6 +75,11 @@ function run() {
             found: 'Encontrado(s)',
             guests: 'huésped(es)',
             viewInChekin: 'Ver en Chekin',
+            fillGuestBtn: 'Guardar Huésped',
+            fillAllGuestsBtn: 'Guardar todos los huéspedes',
+            improveGuestBtn: 'Mejorar Datos',
+            guestSavedBtn: 'Guardado',
+            allGuestsSavedBtn: 'Todos los huéspedes cargados',
             noGuestsYet: '⚠️ Aún no hay huéspedes registrados.',
             noMatch: '❌ No se encontró reserva coincidente en Chekin.',
             error: '❌ Error o No se encontraron datos.',
@@ -74,6 +87,9 @@ function run() {
             name: 'Nombre',
             documentId: 'ID Documento',
             phone: 'Teléfono',
+            city: 'Ciudad',
+            province: 'Provincia',
+            country: 'País',
             useAsPrimary: 'Utilizar Documento',
             guestRegistrationForm: 'Formulario de Registro:',
             open: 'Abrir',
@@ -104,6 +120,64 @@ function run() {
     // ========================================================================
     if (CONFIG.LH_DOMAINS.some(d => currentHost.includes(d))) {
         console.log('🏨 LH Script Loaded');
+
+        const injectWhenReady = () => {
+            if (document.head || document.documentElement) {
+                const target = document.head || document.documentElement;
+                const script = document.createElement('script');
+                script.textContent = `
+                    // Try to get ref from initial HTML headers just in case
+                    fetch(location.href, { method: 'HEAD' }).then(res => {
+                        const ref = res.headers.get('reservation_booking_ref') || res.headers.get('reservation-booking-ref');
+                        if (ref) {
+                            document.documentElement.setAttribute('data-lh-booking-ref', ref);
+                            console.log('🏨 Got booking ref from HEAD:', ref);
+                        }
+                    }).catch(() => {});
+
+                    const originalOpen = XMLHttpRequest.prototype.open;
+                    XMLHttpRequest.prototype.open = function(method, url) {
+                        this.addEventListener('load', function() {
+                            if (typeof url === 'string' && url.includes('/reservations/') && url.includes('form-info=true')) {
+                                try {
+                                    const data = JSON.parse(this.responseText);
+                                    if (data && data.booking_reference_id) {
+                                        document.documentElement.setAttribute('data-lh-booking-ref', data.booking_reference_id);
+                                        console.log('🏨 Got booking reference ID from XHR API:', data.booking_reference_id);
+                                    }
+                                } catch (e) {}
+                            }
+                        });
+                        originalOpen.apply(this, arguments);
+                    };
+
+                    const originalFetchLH = window.fetch;
+                    if (originalFetchLH) {
+                        window.fetch = async function(...args) {
+                            const response = await originalFetchLH.apply(this, args);
+                            try {
+                                const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : '');
+                                if (url.includes('/reservations/') && url.includes('form-info=true')) {
+                                    const clone = response.clone();
+                                    clone.json().then(data => {
+                                        if (data && data.booking_reference_id) {
+                                            document.documentElement.setAttribute('data-lh-booking-ref', data.booking_reference_id);
+                                            console.log('🏨 Got booking reference ID from fetch API:', data.booking_reference_id);
+                                        }
+                                    }).catch(e => {});
+                                }
+                            } catch (e) {}
+                            return response;
+                        };
+                    }
+                `;
+                target.appendChild(script);
+                script.remove();
+            } else {
+                requestAnimationFrame(injectWhenReady);
+            }
+        };
+        injectWhenReady();
 
         const waitForElement = (selector) => {
             return new Promise(resolve => {
@@ -147,8 +221,14 @@ function run() {
 
             // Prepare UI Container
             const container = document.createElement('div');
+            container.className = 'fade-in-ui';
             container.style.cssText = 'margin: 10px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 5px;';
             container.innerHTML = `
+                <style>
+                    button.fill-guest, button.fill-all-guests { transition: all 0.35s ease, opacity 0.3s ease; }
+                    .fade-in-ui { animation: fadeIn 0.5s ease-in-out; }
+                    @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+                </style>
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
                     <img src="https://f.hubspotusercontent10.net/hubfs/8776616/Logo%20nuevo%20azul-1.png" alt="Chekin" style="height: 24px;">
                     <strong>${t.status}</strong>
@@ -183,8 +263,12 @@ function run() {
         const startBackgroundSearch = (checkInDate, rooms, container, cacheKey) => {
             const statusSpan = container.querySelector('#chekin-status');
             statusSpan.innerHTML = `
-                <img src="https://raw.githubusercontent.com/n3r4zzurr0/svg-spinners/refs/heads/main/svg-css/pulse-rings-multiple.svg"
-                     style="width: 16px; height: 16px; vertical-align: middle; margin-right: 5px;">
+                <style>
+                    @keyframes chekinLoadingBar { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
+                </style>
+                <div style="width: 100px; height: 6px; border-radius: 3px; background: #e0e0e0; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; position: relative;">
+                    <div style="width: 40%; height: 100%; background: #f0ad4e; position: absolute; animation: chekinLoadingBar 1s infinite linear;"></div>
+                </div>
                 ${t.searching}
             `;
             statusSpan.style.color = 'orange';
@@ -200,8 +284,11 @@ function run() {
                 timestamp: Date.now()
             });
 
+            const targetRef = document.documentElement.getAttribute('data-lh-booking-ref') || '';
+            console.log('🏨 Launching Chekin Search, Target Ref:', targetRef);
+
             // Open Background Tab with search params
-            const searchUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autosearch=true&date=${encodeURIComponent(checkInDate)}&rooms=${encodeURIComponent(rooms.join(','))}`;
+            const searchUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autosearch=true&date=${encodeURIComponent(checkInDate)}&rooms=${encodeURIComponent(rooms.join(','))}&ref=${encodeURIComponent(targetRef)}`;
             GM_openInTab(searchUrl, { active: false, insert: true, setParent: true });
 
             let handled = false;
@@ -254,7 +341,7 @@ function run() {
             setTimeout(() => {
                 if (handled) return;
                 handler(null, null, { status: 'login_required' }, null);
-            }, 10000);
+            }, 20000);
 
             // Listen for response
             const listenerId = GM_addValueChangeListener('chekin_response', handler);
@@ -362,6 +449,197 @@ function run() {
             };
         };
 
+        const triggerVueUpdate = (element, newValue) => {
+            if (!element) return;
+            const isSelect = element.tagName === 'SELECT';
+            const prototype = isSelect ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+            if (setter) {
+                setter.call(element, newValue);
+            } else {
+                element.value = newValue; // Fallback
+            }
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+            element.dispatchEvent(new Event('blur', { bubbles: true }));
+            element.dispatchEvent(new Event('focusout', { bubbles: true }));
+        };
+
+        const normalizeString = (str) => {
+            return (str || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+        };
+
+        const mapDocType = (val) => {
+            if (!val) return '';
+            val = val.toUpperCase();
+            if (val.includes('PASSPORT') || val === 'P') return 'Passport';
+            if (val.includes('DRIV') || val === 'C') return "Driver's license";
+            if (val.includes('RESIDENCE') || val.includes('NIE') || val.startsWith('ES_X') || val.startsWith('ES_Y') || val.startsWith('ES_Z')) return 'Spanish Residence Permit';
+            return 'ID card';
+        };
+
+        const findMatchingGuestForm = (guest) => {
+            const forms = Array.from(document.querySelectorAll('.guest-form'));
+            const normGuestFirst = normalizeString(guest.first_name);
+            const normGuestLast = normalizeString(guest.last_name + ' ' + (guest.second_surname || '')).trim();
+
+            for (const form of forms) {
+                const fNameInput = form.querySelector('input[name="first_name"]');
+                const lNameInput = form.querySelector('input[name="last_name"]');
+                if (!fNameInput && !lNameInput) continue;
+
+                const normFName = normalizeString(fNameInput.value);
+                const normLName = normalizeString(lNameInput.value);
+
+                if (normFName && normLName) {
+                    if (normFName.includes(normGuestFirst) || normGuestFirst.includes(normFName)) {
+                        const isMatchLName = normLName.includes(normalizeString(guest.last_name)) || normalizeString(guest.last_name).includes(normLName);
+                        if (isMatchLName) return form;
+                    }
+                }
+            }
+            return null;
+        };
+
+        const updateGuestButtonsState = (container, data) => {
+            const fillButtons = container.querySelectorAll('button.fill-guest');
+            if (!fillButtons.length) return;
+
+            let allFullyLoaded = true;
+
+            data.forEach((guest, index) => {
+                const btn = fillButtons[index];
+                if (!btn) return;
+
+                const matchingForm = findMatchingGuestForm(guest);
+                if (matchingForm) {
+                    const checkFields = [
+                        { name: 'email', val: guest.email },
+                        { name: 'phone_number', val: guest.phone },
+                        { name: 'id_number', val: guest.document_number },
+                        { name: 'nationality', val: guest.nationality },
+                        { name: 'date_of_birth', val: guest.date_of_birth },
+                        { name: 'city', val: guest.city },
+                        { name: 'country', val: guest.country }
+                    ];
+
+                    let canImprove = false;
+                    for (const field of checkFields) {
+                        if (field.val) {
+                            const input = matchingForm.querySelector(`input[name="${field.name}"], select[name="${field.name}"]`);
+                            if (input && !input.value) {
+                                canImprove = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (canImprove) {
+                        btn.className = 'btn btn-sm btn-warning fill-guest';
+                        btn.innerHTML = `🔄 ${t.improveGuestBtn || 'Improve Data'}`;
+                        allFullyLoaded = false;
+                    } else {
+                        btn.className = 'btn btn-sm btn-default fill-guest';
+                        btn.innerHTML = `✅ ${t.guestSavedBtn || 'Saved'}`;
+                        btn.disabled = true;
+                        btn.style.opacity = '0.7';
+                        btn.style.cursor = 'not-allowed';
+                    }
+                } else {
+                    btn.className = 'btn btn-sm btn-success fill-guest';
+                    btn.innerHTML = `${t.fillGuestBtn || 'Save Guest'}`;
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                    btn.style.cursor = 'pointer';
+                    allFullyLoaded = false;
+                }
+            });
+
+            const addAllBtn = container.querySelector('.fill-all-guests');
+            if (addAllBtn) {
+                if (allFullyLoaded) {
+                    addAllBtn.className = 'btn btn-sm btn-default fill-all-guests';
+                    addAllBtn.innerHTML = `✅ ${t.allGuestsSavedBtn || 'All guests loaded'}`;
+                    addAllBtn.disabled = true;
+                    addAllBtn.style.opacity = '0.7';
+                    addAllBtn.style.cursor = 'not-allowed';
+                } else {
+                    addAllBtn.className = 'btn btn-sm btn-success fill-all-guests';
+                    addAllBtn.innerHTML = t.fillAllGuestsBtn || 'Save All Guests';
+                    addAllBtn.disabled = false;
+                    addAllBtn.style.opacity = '1';
+                    addAllBtn.style.cursor = 'pointer';
+                }
+            }
+        };
+
+        const fillGuestForm = async (guest) => {
+            let forms = document.querySelectorAll('.guest-form');
+            let targetForm = findMatchingGuestForm(guest);
+
+            if (!targetForm) {
+                for (let i = forms.length - 1; i >= 0; i--) {
+                    const fname = forms[i].querySelector('input[name="first_name"]')?.value;
+                    const lname = forms[i].querySelector('input[name="last_name"]')?.value;
+                    if (!fname && !lname) {
+                        targetForm = forms[i];
+                        break;
+                    }
+                }
+            }
+
+            if (!targetForm) {
+                const btns = Array.from(document.querySelectorAll('button.btn-link'));
+                const addBtn = btns.find(b => b.textContent.includes('Añadir nuevo huésped') || b.textContent.includes('Add new guest') || b.querySelector('.fa-plus'));
+                if (addBtn) {
+                    addBtn.click();
+                    await new Promise(r => setTimeout(r, 400));
+                    forms = document.querySelectorAll('.guest-form');
+                    targetForm = forms[forms.length - 1];
+                }
+            }
+
+            if (!targetForm) {
+                console.error("Could not find or create a guest form");
+                return;
+            }
+
+            const expandBtn = targetForm.querySelector('button.btn-expand');
+            if (expandBtn && expandBtn.querySelector('.fa-chevron-circle-down')) {
+                expandBtn.click();
+                await new Promise(r => setTimeout(r, 300));
+            }
+
+            const fieldMapping = [
+                { name: 'first_name', val: guest.first_name },
+                { name: 'last_name', val: guest.last_name },
+                { name: 'second_surname', val: guest.second_surname },
+                { name: 'email', val: guest.email },
+                { name: 'phone_number', val: guest.phone },
+                { name: 'gender', val: guest.gender },
+                { name: 'id_document_type', val: mapDocType(guest.document_type_raw) },
+                { name: 'id_number', val: guest.document_number },
+                { name: 'nationality', val: guest.nationality },
+                { name: 'date_of_issue', val: guest.date_of_issue },
+                { name: 'expiry_date', val: guest.expiry_date },
+                { name: 'date_of_birth', val: guest.date_of_birth },
+                { name: 'address', val: guest.address },
+                { name: 'country', val: guest.country },
+                { name: 'city', val: guest.city },
+                { name: 'state', val: guest.province },
+                { name: 'post_code', val: guest.post_code }
+            ];
+
+            for (const field of fieldMapping) {
+                if (!field.val) continue;
+                const input = targetForm.querySelector(`input[name="${field.name}"], select[name="${field.name}"]`);
+                if (input) {
+                    triggerVueUpdate(input, field.val);
+                }
+            }
+            console.log("Guest form filled with data:", guest);
+        };
+
         const renderResults = (container, data, link, signupFormLink) => {
             const statusSpan = container.querySelector('#chekin-status');
             statusSpan.innerHTML = `
@@ -379,12 +657,16 @@ function run() {
             if (data.length === 0) return;
 
             const table = document.createElement('table');
+            table.className = 'fade-in-ui';
             table.style.cssText = 'width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 12px;';
             table.innerHTML = `
                 <tr style="background:#eee; text-align:left;">
                     <th style="padding:5px; border:1px solid #ccc;">${t.name}</th>
                     <th style="padding:5px; border:1px solid #ccc;">${t.phone}</th>
                     <th style="padding:5px; border:1px solid #ccc;">${t.documentId}</th>
+                    <th style="padding:5px; border:1px solid #ccc;">${t.city}</th>
+                    <th style="padding:5px; border:1px solid #ccc;">${t.province}</th>
+                    <th style="padding:5px; border:1px solid #ccc;">${t.country}</th>
                     <th style="padding:5px; border:1px solid #ccc; text-align: right; width: 1%;"></th>
                 </tr>
             `;
@@ -395,8 +677,12 @@ function run() {
                     <td style="padding:5px; border:1px solid #ccc;">${person.full_name || 'N/A'}</td>
                     <td style="padding:5px; border:1px solid #ccc;">${person.phone || 'N/A'}</td>
                     <td style="padding:5px; border:1px solid #ccc;"><b>${person.document_number || 'N/A'}</b></td>
+                    <td style="padding:5px; border:1px solid #ccc;">${person.city || ''}</td>
+                    <td style="padding:5px; border:1px solid #ccc;">${person.province || ''}</td>
+                    <td style="padding:5px; border:1px solid #ccc;">${person.country || ''}</td>
                     <td style="padding:5px; border:1px solid #ccc; text-align: right;">
-                        <button class="btn btn-sm btn-primary use">${t.useAsPrimary}</button>
+                        <button class="btn btn-sm btn-primary use" style="margin-bottom:4px; width:100%;">${t.useAsPrimary}</button>
+                        <button class="btn btn-sm btn-success fill-guest" style="width:100%; white-space:normal;">${t.fillGuestBtn || 'Fill Details'}</button>
                     </td>
                 `;
                 table.appendChild(row);
@@ -404,7 +690,34 @@ function run() {
 
             container.querySelector('#chekin-table').appendChild(table);
 
+            if (data.length > 1) {
+                const addAllBtn = document.createElement('button');
+                addAllBtn.className = 'btn btn-sm btn-success fill-all-guests';
+                addAllBtn.style.cssText = 'margin-top: 10px; width: 100%; font-weight: bold;';
+                addAllBtn.innerText = t.fillAllGuestsBtn || 'Save All Guests';
+                container.querySelector('#chekin-table').appendChild(addAllBtn);
+
+                addAllBtn.onclick = async (evt) => {
+                    evt.preventDefault();
+                    for (const guest of data) {
+                        await fillGuestForm(guest);
+                        updateGuestButtonsState(container, data);
+                        await new Promise(r => setTimeout(r, 600));
+                    }
+                };
+            }
+
             let buttons = container.querySelectorAll('button.use');
+            let fillButtons = container.querySelectorAll('button.fill-guest');
+
+            fillButtons.forEach((btn, index) => {
+                btn.onclick = async (evt) => {
+                    evt.preventDefault();
+                    await fillGuestForm(data[index]);
+                    updateGuestButtonsState(container, data);
+                };
+            });
+
             buttons.forEach((btn, index) => {
                 btn.onclick = (evt) => {
                     evt.preventDefault();
@@ -440,6 +753,11 @@ function run() {
                     console.log("Input updated:", id);
                 };
             });
+
+            // Initial state evaluation once rendered
+            setTimeout(() => {
+                updateGuestButtonsState(container, data);
+            }, 500);
         };
 
         const interval = setInterval(() => {
@@ -463,10 +781,11 @@ function run() {
         const isAutoSearch = urlParams.get('autosearch') === 'true';
         const targetDate = urlParams.get('date');
         const targetRooms = urlParams.get('rooms')?.split(',') || [];
+        const targetRef = urlParams.get('ref') || '';
 
         if (!isAutoSearch) return;
 
-        console.log('🔍 Auto-search mode:', { targetDate, targetRooms });
+        console.log('🔍 Auto-search mode:', { targetDate, targetRooms, targetRef });
 
         // Check login status
         const checkLoginStatus = () => {
@@ -540,12 +859,22 @@ function run() {
                     if (data.results) {
                         window.INTERCEPTED_RESERVATIONS = data.results;
 
-                        // Find reservation matching any of our target rooms
-                        const targetReservation = data.results.find(r =>
-                            r.rooms && r.rooms.some(roomObj =>
-                                targetRooms.includes(roomObj.number)
-                            )
-                        );
+                        // Find reservation matching targetRef OR any of our target rooms
+                        let targetReservation = null;
+                        if (targetRef) {
+                            targetReservation = data.results.find(r => r.external_id === targetRef);
+                            if (!targetReservation) {
+                                targetReservation = data.results.find(r => r.external_id && (targetRef.includes(r.external_id) || r.external_id.includes(targetRef)));
+                            }
+                        }
+
+                        if (!targetReservation) {
+                            targetReservation = data.results.find(r =>
+                                r.rooms && r.rooms.some(roomObj =>
+                                    targetRooms.includes(roomObj.number)
+                                )
+                            );
+                        }
 
                         if (!targetReservation) {
                             console.warn(`No reservation found for rooms ${targetRooms.join(', ')} on ${targetDate}`);
@@ -594,9 +923,26 @@ function run() {
 
                             if (data2.members && data2.members.length > 0) {
                                 const guestData = data2.members.map(guest => ({
-                                    full_name: guest.full_name,
-                                    document_number: guest.document?.number || 'N/A',
-                                    phone: guest.phone || 'N/A'
+                                    full_name: guest.full_name || ((guest.name || '') + ' ' + (guest.surname || '')).trim(),
+                                    first_name: guest.name || '',
+                                    last_name: guest.surname || '',
+                                    second_surname: guest.second_surname || '',
+                                    email: guest.email || '',
+                                    phone: guest.phone?.number ? ((guest.phone.code || '') + guest.phone.number).replace(/\s+/g, '') : (typeof guest.phone === 'string' ? guest.phone.replace(/\s+/g, '') : ''),
+                                    gender: guest.gender?.value === 'M' ? 'Male' : (guest.gender?.value === 'F' ? 'Female' : (guest.gender?.value === 'O' ? 'Other' : '')),
+                                    document_type_raw: guest.document_type?.value || guest.document_type?.label || '',
+                                    document_number: guest.document_number || guest.document?.number || 'N/A',
+                                    nationality: guest.nationality?.name || '',
+                                    date_of_birth: guest.birth_date ? guest.birth_date.split('-').reverse().join('/') : '',
+                                    date_of_issue: guest.document_issue_date ? guest.document_issue_date.split('-').reverse().join('/') : '',
+                                    expiry_date: guest.document_expiration_date ? guest.document_expiration_date.split('-').reverse().join('/') : '',
+                                    address: guest.residence_address || guest.residence?.address || '',
+                                    city: guest.residence_city || guest.residence?.city || '',
+                                    province: guest.residence_province?.name || guest.residence?.details?.division_level_2?.name_es || guest.residence?.details?.division_level_2?.name_eng || '',
+                                    country: guest.residence_country?.name || guest.residence?.country?.name || '',
+                                    country_code: guest.residence_country?.alpha_3 || guest.residence?.country?.alpha_3 || '',
+                                    post_code: guest.residence_postal_code || guest.residence?.postal_code || '',
+                                    raw_data: guest
                                 }));
 
                                 console.log('📝 Sending Guest Data:', guestData);
@@ -620,7 +966,7 @@ function run() {
             return response;
         };
 
-        unsafeWindow.fetch = newFetch ;
+        unsafeWindow.fetch = newFetch;
         // Check login after page loads
         setTimeout(() => {
             if (checkLoginStatus()) return;
@@ -630,4 +976,4 @@ function run() {
 }
 
 //setTimeout(run, 4000);
- run();
+run();
