@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.0.0
+// @version      1.0.1
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception and be able to load Checkin guest data into Little Hotelier reservation form.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
