@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.0.1
+// @version      1.1.0
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception and be able to load Checkin guest data into Little Hotelier reservation form.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
 // @match        https://dashboard.chekin.com/bookings?autosearch=true*
+// @match        https://dashboard.chekin.com/bookings?autocreate=true*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=littlehotelier.com
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -41,6 +42,7 @@ function run() {
             found: 'Found',
             guests: 'guest(s)',
             viewInChekin: 'View in Chekin',
+            createReservation: 'Create Checkin Reservation',
             fillGuestBtn: 'Save Guest',
             fillAllGuestsBtn: 'Save All Guests',
             improveGuestBtn: 'Improve Data',
@@ -75,6 +77,7 @@ function run() {
             found: 'Encontrado(s)',
             guests: 'huésped(es)',
             viewInChekin: 'Ver en Chekin',
+            createReservation: 'Crear Reserva en Chekin',
             fillGuestBtn: 'Guardar Huésped',
             fillAllGuestsBtn: 'Guardar todos los huéspedes',
             improveGuestBtn: 'Mejorar Datos',
@@ -193,20 +196,32 @@ function run() {
         };
 
         const getReservationData = () => {
-            // Get check-in date
+            // Get check-in and check-out dates
             const checkInDate = document.querySelector('#check_in_date')?.value || '';
+            const checkOutDate = document.querySelector('#check_out_date')?.value || '';
 
             // Get room numbers (filter out nulls for unassigned rooms)
             const rooms = [...document.querySelectorAll('select[name="reservation_room_types[][room_id]"]')]
                 .map(e => e.querySelector("[selected]")?.text)
                 .filter(Boolean);
 
-            // Get guest name
+            // Get guest details
             const firstName = document.querySelector('#guest_first_name')?.value || '';
             const lastName = document.querySelector('#guest_last_name')?.value || '';
             const fullName = `${firstName} ${lastName}`.trim();
+            const email = document.querySelector('#guest_email')?.value || '';
+            const phone = document.querySelector('#guest_phone_number')?.value || '';
 
-            return { checkInDate, rooms, fullName, firstName, lastName };
+            // Get guests count
+            const adults = parseInt(document.querySelector('#reservation_number_adults')?.value || '1', 10);
+            const children = parseInt(document.querySelector('#reservation_number_children')?.value || '0', 10);
+            const numberOfGuests = (adults + children).toString();
+
+            // Get Source / Channel
+            const channelSelect = document.querySelector('#reservation_channel_id');
+            const sourceName = channelSelect ? channelSelect.options[channelSelect.selectedIndex]?.text : 'Little Hotelier';
+
+            return { checkInDate, checkOutDate, rooms, fullName, firstName, lastName, email, phone, numberOfGuests, sourceName };
         };
 
         const initLittleHotelier = async () => {
@@ -228,6 +243,8 @@ function run() {
                     button.fill-guest, button.fill-all-guests { transition: all 0.35s ease, opacity 0.3s ease; }
                     .fade-in-ui { animation: fadeIn 0.5s ease-in-out; }
                     @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+                    .chekin-spinner { display: inline-block; animation: chekinSpin 1s linear infinite; }
+                    @keyframes chekinSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
                 </style>
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
                     <img src="https://f.hubspotusercontent10.net/hubfs/8776616/Logo%20nuevo%20azul-1.png" alt="Chekin" style="height: 24px;">
@@ -284,8 +301,11 @@ function run() {
                 timestamp: Date.now()
             });
 
-            const targetRef = document.documentElement.getAttribute('data-lh-booking-ref') || '';
-            console.log('🏨 Launching Chekin Search, Target Ref:', targetRef);
+            // Get booking reference - prefer API-captured, fallback to URL path
+            const apiRef = document.documentElement.getAttribute('data-lh-booking-ref') || '';
+            const urlMatch = window.location.pathname.match(/\/reservations\/([^/]+)\//);
+            const targetRef = apiRef || (urlMatch ? urlMatch[1] : '');
+            console.log('🏨 Launching Chekin Search, Target Ref:', targetRef, '(API:', apiRef, ', URL:', urlMatch?.[1], ')');
 
             // Open Background Tab with search params
             const searchUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autosearch=true&date=${encodeURIComponent(checkInDate)}&rooms=${encodeURIComponent(rooms.join(','))}&ref=${encodeURIComponent(targetRef)}`;
@@ -308,6 +328,7 @@ function run() {
 
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = newValue.link;
+                    checkinLink.innerText = t.viewInChekin;
                 }
                 else if (newValue.status === 'login_required') {
                     renderLoginButton(container);
@@ -318,6 +339,7 @@ function run() {
 
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = newValue.link;
+                    checkinLink.innerText = t.viewInChekin;
 
                     if (newValue.signupFormLink) {
                         renderSignupFormLink(container, newValue.signupFormLink);
@@ -326,25 +348,149 @@ function run() {
                 else if (newValue.status === 'not_found') {
                     statusSpan.innerText = t.noMatch;
                     statusSpan.style.color = 'red';
+
+                    checkinLink.style.display = 'inline-block';
+                    checkinLink.href = 'javascript:void(0)';
+                    checkinLink.innerText = t.createReservation;
+                    checkinLink.onclick = (e) => {
+                        e.preventDefault();
+                        startBackgroundCreate(getReservationData(), container);
+                    };
+                }
+                else if (newValue.status === 'created') {
+                    statusSpan.innerText = '✅ Reservation created in Chekin!';
+                    statusSpan.style.color = 'green';
+
+                    checkinLink.style.display = 'inline-block';
+                    checkinLink.href = newValue.link;
+                    checkinLink.innerText = t.viewInChekin;
+                    checkinLink.onclick = null;
+                    checkinLink.target = '_blank';
+                }
+                else if (newValue.status === 'creating') {
+                    statusSpan.innerHTML = '<span class="chekin-spinner">⏳</span> Creating reservation...';
+                    statusSpan.style.color = 'orange';
+                    checkinLink.style.display = 'none';
+                    return; // Don't remove listener yet
                 }
                 else {
-                    statusSpan.innerText = t.error;
+                    statusSpan.innerText = t.error + (newValue.msg ? ': ' + newValue.msg : '');
                     statusSpan.style.color = 'red';
                 }
 
-                GM_removeValueChangeListener(listenerId);
-                handled = true;
+                if (newValue.status !== 'creating') {
+                    GM_removeValueChangeListener(listenerId);
+                    handled = true;
+                }
 
             }
 
 
             setTimeout(() => {
-                if (handled) return;
+                if (handled || GM_getValue('chekin_response')?.status === 'creating') return;
                 handler(null, null, { status: 'login_required' }, null);
             }, 20000);
 
             // Listen for response
             const listenerId = GM_addValueChangeListener('chekin_response', handler);
+        };
+
+        // Convert dd/mm/yyyy to yyyy-mm-dd for Chekin API
+        const convertDateFormat = (dateStr) => {
+            if (!dateStr) return '';
+            // Already in yyyy-mm-dd format
+            if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+            // Convert dd/mm/yyyy to yyyy-mm-dd
+            const parts = dateStr.split('/');
+            if (parts.length === 3) return `${parts[2]}-${parts[1]}-${parts[0]}`;
+            return dateStr;
+        };
+
+        const startBackgroundCreate = (resData, container) => {
+            // Get booking reference - prefer API-captured, fallback to URL
+            const apiRef = document.documentElement.getAttribute('data-lh-booking-ref') || '';
+            const urlMatch = window.location.pathname.match(/\/reservations\/([^/]+)\//);
+            const targetRef = apiRef || (urlMatch ? urlMatch[1] : '');
+            console.log('🏨 Create - Booking Reference:', targetRef, '(API:', apiRef, ', URL:', urlMatch?.[1], ')');
+            const payload = {
+                ...resData,
+                checkInDate: convertDateFormat(resData.checkInDate),
+                checkOutDate: convertDateFormat(resData.checkOutDate),
+                targetRef,
+                timestamp: Date.now()
+            };
+
+            // Set creating status and register listener for result
+            GM_deleteValue('chekin_response');
+            GM_setValue('chekin_create_request', payload);
+
+            // Small delay to ensure the listener is registered before setting creating status
+            setTimeout(() => {
+                GM_setValue('chekin_response', { status: 'creating' });
+            }, 50);
+
+            console.log('🏨 Launching Chekin Create:', payload);
+
+            const statusSpan = container.querySelector('#chekin-status');
+            const checkinLink = container.querySelector('#chekin-link');
+            statusSpan.innerHTML = '<span class="chekin-spinner">⏳</span> Creating reservation...';
+            statusSpan.style.color = 'orange';
+            checkinLink.style.display = 'none';
+
+            const createUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autocreate=true`;
+            GM_openInTab(createUrl, { active: false, insert: true, setParent: true });
+
+            // Listen for the creation result
+            let createHandled = false;
+            const createHandler = (name, oldValue, newValue, remote) => {
+                if (!newValue || newValue.status === 'creating') return;
+
+                if (newValue.status === 'created') {
+                    statusSpan.innerHTML = '✅ Reservation created in Chekin!';
+                    statusSpan.style.color = 'green';
+                    checkinLink.style.display = 'inline-block';
+                    checkinLink.href = newValue.link;
+                    checkinLink.innerText = t.viewInChekin;
+                    checkinLink.onclick = null;
+                    checkinLink.target = '_blank';
+                    if (newValue.signupFormLink) {
+                        renderSignupFormLink(container, newValue.signupFormLink);
+                    }
+                } else if (newValue.status === 'error') {
+                    statusSpan.innerHTML = '❌ Creation failed' + (newValue.msg ? ': ' + newValue.msg : '');
+                    statusSpan.style.color = 'red';
+                    checkinLink.style.display = 'inline-block';
+                    checkinLink.href = 'javascript:void(0)';
+                    checkinLink.innerText = '🔄 Retry';
+                    checkinLink.onclick = (e) => {
+                        e.preventDefault();
+                        startBackgroundCreate(getReservationData(), container);
+                    };
+                } else if (newValue.status === 'login_required') {
+                    renderLoginButton(container);
+                }
+
+                GM_removeValueChangeListener(createListenerId);
+                createHandled = true;
+            };
+
+            const createListenerId = GM_addValueChangeListener('chekin_response', createHandler);
+
+            // Timeout after 30 seconds
+            setTimeout(() => {
+                if (!createHandled) {
+                    statusSpan.innerHTML = '❌ Creation timed out. Please try again.';
+                    statusSpan.style.color = 'red';
+                    checkinLink.style.display = 'inline-block';
+                    checkinLink.href = 'javascript:void(0)';
+                    checkinLink.innerText = '🔄 Retry';
+                    checkinLink.onclick = (e) => {
+                        e.preventDefault();
+                        startBackgroundCreate(getReservationData(), container);
+                    };
+                    GM_removeValueChangeListener(createListenerId);
+                }
+            }, 30000);
         };
 
         const renderLoginButton = (container) => {
@@ -796,13 +942,14 @@ function run() {
         // Get search params from URL
         const urlParams = new URLSearchParams(window.location.search);
         const isAutoSearch = urlParams.get('autosearch') === 'true';
+        const isAutoCreate = urlParams.get('autocreate') === 'true';
         const targetDate = urlParams.get('date');
         const targetRooms = urlParams.get('rooms')?.split(',') || [];
         const targetRef = urlParams.get('ref') || '';
 
-        if (!isAutoSearch) return;
+        if (!isAutoSearch && !isAutoCreate) return;
 
-        console.log('🔍 Auto-search mode:', { targetDate, targetRooms, targetRef });
+        console.log('🔍 Chekin mode:', { isAutoSearch, isAutoCreate, targetDate, targetRooms, targetRef });
 
         // Check login status
         const checkLoginStatus = () => {
@@ -815,28 +962,213 @@ function run() {
             return false;
         };
 
-        // Validate request freshness
-        const request = GM_getValue('chekin_request');
-        if (!request || (Date.now() - request.timestamp > 90000)) {
-            console.log('🚫 Request expired or not found');
-            return;
+        if (isAutoSearch) {
+            // Validate request freshness
+            const request = GM_getValue('chekin_request');
+            if (!request || (Date.now() - request.timestamp > 90000)) {
+                console.log('🚫 Request expired or not found');
+                return;
+            }
+        }
+
+        let createRequest = null;
+        if (isAutoCreate) {
+            createRequest = GM_getValue('chekin_create_request');
+            if (!createRequest || (Date.now() - createRequest.timestamp > 90000)) {
+                console.log('🚫 Create request expired or not found');
+                return;
+            }
         }
 
         // Storage for intercepted data
         window.INTERCEPTED_RESERVATIONS = [];
         let dataProcessed = false;
+        let authToken = null;
 
         // Save the original fetch function
         const originalFetch = unsafeWindow.fetch;
+
+        // Extract JWT token from fetch arguments if possible
+        const extractToken = (init) => {
+            if (authToken) return;
+            if (init && init.headers) {
+                if (typeof init.headers.get === 'function') {
+                    const auth = init.headers.get('Authorization') || init.headers.get('authorization');
+                    if (auth && auth.startsWith('JWT ')) authToken = auth;
+                } else {
+                    const hdrs = Array.isArray(init.headers) ? init.headers : Object.entries(init.headers);
+                    for (const [k, v] of hdrs) {
+                        if (k.toLowerCase() === 'authorization' && v.startsWith('JWT ')) {
+                            authToken = v;
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        // Execute creation flow
+        const executeCreation = async () => {
+            if (!authToken) {
+                console.error("No auth token captured yet for creation flow");
+                setTimeout(executeCreation, 500); // Retry until token captured
+                return;
+            }
+            if (dataProcessed) return;
+            dataProcessed = true;
+
+            try {
+                const fetchOpts = {
+                    method: "GET",
+                    headers: {
+                        "accept": "application/json, text/plain, */*",
+                        "authorization": authToken
+                    }
+                };
+
+                // 1. Fetch housings
+                const housingRes = await originalFetch("https://a.chekin.io/api/v3/housings/?page=1&name=&field_set=id,name", fetchOpts);
+                const housingData = await housingRes.json();
+                if (!housingData.results || housingData.results.length === 0) {
+                    throw new Error("No properties found in Chekin");
+                }
+                const housingId = housingData.results[0].id; // Pick first housing
+
+                // 2. Fetch rooms
+                const roomsRes = await originalFetch(`https://a.chekin.io/api/v4/housings-booking-page/${housingId}/`, fetchOpts);
+                const roomsData = await roomsRes.json();
+
+                // Map rooms from LH to Chekin
+                const mappedRooms = [];
+                const chekinRooms = roomsData.rooms || [];
+                for (const lhRoom of (createRequest.rooms || [])) {
+                    const lhNorm = (lhRoom || '').toString().trim().toLowerCase();
+                    const match = chekinRooms.find(r =>
+                        (r.external_id && r.external_id.toLowerCase() === lhNorm) ||
+                        (r.number && r.number.toLowerCase() === lhNorm) ||
+                        (r.name && r.name.toLowerCase() === lhNorm) ||
+                        (r.name && r.name.toLowerCase().includes(lhNorm)) ||
+                        (lhNorm && r.number && lhNorm.includes(r.number.toLowerCase()))
+                    );
+                    if (match) {
+                        mappedRooms.push({ id: match.id, external_id: lhRoom });
+                    } else {
+                        console.warn(`⚠️ No Chekin room match for LH room "${lhRoom}". Available:`, chekinRooms.map(r => r.name || r.number));
+                    }
+                }
+
+                // Default contract date to today if not provided
+                const contractDate = new Date().toISOString().split('T')[0];
+
+                // 3. Create reservation
+                const numberOfGuests = parseInt(createRequest.numberOfGuests, 10) || 1;
+                console.log('📦 Room mapping result:', { requestedRooms: createRequest.rooms, mappedRooms, availableRooms: roomsData.rooms?.map(r => ({ id: r.id, name: r.name, number: r.number, external_id: r.external_id })) });
+
+                const resPayload = {
+                    "default_phone_number": createRequest.phone || "",
+                    "default_invite_email": createRequest.email || "",
+                    "default_email_language": "spa",
+                    "check_in_date": createRequest.checkInDate,
+                    "check_out_date": createRequest.checkOutDate,
+                    "price": null,
+                    "deposit": null,
+                    "default_leader_full_name": createRequest.fullName || "",
+                    "housing_id": housingId,
+                    "guest_group": {
+                        "members": [],
+                        "number_of_guests": numberOfGuests
+                    },
+                    "rooms": mappedRooms,
+                    "source_name": createRequest.sourceName || "Little Hotelier",
+                    "booking_reference": createRequest.targetRef || "",
+                    "external_id": createRequest.targetRef || "",
+                    "payment_method": "EFECT",
+                    "contract_date": contractDate
+                };
+
+                const createRes = await originalFetch("https://a.chekin.io/api/v3/reservations/", {
+                    method: "POST",
+                    headers: {
+                        "accept": "application/json, text/plain, */*",
+                        "content-type": "application/json",
+                        "authorization": authToken
+                    },
+                    body: JSON.stringify(resPayload)
+                });
+
+                if (!createRes.ok) {
+                    const errorText = await createRes.text();
+                    throw new Error("Failed to create: " + errorText);
+                }
+
+                const createdData = await createRes.json();
+
+                // 4. Set email settings
+                await originalFetch("https://a.chekin.io/api/v3/email-sending-settings/", {
+                    method: "POST",
+                    headers: {
+                        "accept": "application/json, text/plain, */*",
+                        "content-type": "application/json",
+                        "authorization": authToken
+                    },
+                    body: JSON.stringify({
+                        "is_sending_after_reservation_created_enabled": true,
+                        "is_sending_one_week_before_check_in_enabled": false,
+                        "is_sending_72_hours_before_check_in_enabled": true,
+                        "is_sending_48_hours_before_check_in_enabled": false,
+                        "is_sending_24_hours_before_check_in_enabled": true,
+                        "is_sending_enabled": true,
+                        "reservation": createdData.id,
+                        "type": "CH_ONLINE"
+                    })
+                }).catch(e => console.warn("Email settings failed:", e));
+
+                // 5. Fetch signup form link
+                let signupFormLink = null;
+                try {
+                    const lightRes = await originalFetch(
+                        `https://a.chekin.io/api/v3/light/reservations/${createdData.id}/`,
+                        fetchOpts
+                    );
+                    const lightData = await lightRes.json();
+                    signupFormLink = lightData.signup_form_link || null;
+                    console.log('📋 Signup form link:', signupFormLink);
+                } catch (e) {
+                    console.warn('Could not fetch signup form link:', e);
+                }
+
+                // Success
+                GM_setValue('chekin_response', {
+                    status: 'created',
+                    link: `https://dashboard.chekin.com/bookings/${createdData.id}`,
+                    signupFormLink
+                });
+                console.log("✅ Reservation created successfully", createdData);
+                setTimeout(() => window.close(), 2000);
+
+            } catch (err) {
+                console.error("Error creating reservation", err);
+                GM_setValue('chekin_response', { status: 'error', msg: err.message });
+                setTimeout(() => window.close(), 3000);
+            }
+        };
 
         // Overwrite fetch
         async function newFetch(input, init) {
             let url = input;
 
-            console.log("input", input);
+            extractToken(init);
 
             if (input instanceof Request) {
                 url = input.url;
+                extractToken(input);
+            }
+
+            if (isAutoCreate) {
+                // If we are in autocreate mode, trigger execution once we capture auth
+                if (authToken && !dataProcessed) {
+                    executeCreation();
+                }
             }
 
             // Intercept reservations API call
@@ -864,8 +1196,10 @@ function run() {
 
             const response = await originalFetch(input || url, init);
 
+            if (isAutoCreate) return response; // Skip interception payload parsing on autosearch logic if autocreating
+
             // Capture reservation list data
-            if (typeof url === 'string' && url.includes('/api/v4/status/reservations/') && !dataProcessed) {
+            if (isAutoSearch && typeof url === 'string' && url.includes('/api/v4/status/reservations/') && !dataProcessed) {
                 const clone = response.clone();
 
                 clone.json().then(async data => {
@@ -879,10 +1213,30 @@ function run() {
                         // Find reservation matching targetRef OR any of our target rooms
                         let targetReservation = null;
                         if (targetRef) {
-                            targetReservation = data.results.find(r => r.external_id === targetRef);
-                            if (!targetReservation) {
-                                targetReservation = data.results.find(r => r.external_id && (targetRef.includes(r.external_id) || r.external_id.includes(targetRef)));
-                            }
+                            // Check multiple possible field names for the booking reference
+                            const matchByRef = (r) => {
+                                const fields = [r.external_id, r.booking_reference, r.external_booking_reference, r.reference];
+                                return fields.some(f => f && (
+                                    f === targetRef ||
+                                    targetRef.includes(f) ||
+                                    f.includes(targetRef)
+                                ));
+                            };
+                            targetReservation = data.results.find(matchByRef);
+
+                            // Debug: log what reference fields each reservation has
+                            console.log('🔍 Search matching - targetRef:', targetRef);
+                            data.results.forEach((r, i) => {
+                                console.log(`  Reservation ${i}:`, {
+                                    id: r.id,
+                                    external_id: r.external_id,
+                                    booking_reference: r.booking_reference,
+                                    external_booking_reference: r.external_booking_reference,
+                                    reference: r.reference,
+                                    rooms: r.rooms?.map(rm => rm.number),
+                                    guests: r.guests
+                                });
+                            });
                         }
 
                         if (!targetReservation) {
