@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.1.0
-// @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception and be able to load Checkin guest data into Little Hotelier reservation form.
+// @version      1.3.0
+// @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception. Loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
+// @match        https://application.littlehotelier.com/properties/*/calendar/*
 // @match        https://dashboard.chekin.com/bookings?autosearch=true*
 // @match        https://dashboard.chekin.com/bookings?autocreate=true*
+// @match        https://dashboard.chekin.com/bookings?autobatchcheck=true*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=littlehotelier.com
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -27,10 +29,12 @@ function run() {
     'use strict';
 
     const CONFIG = {
-        LH_DOMAINS: ['app.littlehotelier.com'],
+        LH_DOMAINS: ['app.littlehotelier.com', 'application.littlehotelier.com'],
         CHEKIN_DOMAIN: 'dashboard.chekin.com',
         STORAGE_PREFIX: 'lh_chekin_cache_v2_',
-        CACHE_DURATION: 1000 * 60 * 60 * 24 // 24 hours
+        CACHE_DURATION: 1000 * 60 * 60 * 24, // 24 hours
+        CALENDAR_PRELOAD_KEY: 'lh_calendar_reservations_preload',
+        CALENDAR_PRELOAD_TTL: 1000 * 60 * 60 * 4 // 4 hours
     };
 
     // Translations
@@ -123,6 +127,300 @@ function run() {
     // ========================================================================
     if (CONFIG.LH_DOMAINS.some(d => currentHost.includes(d))) {
         console.log('🏨 LH Script Loaded');
+
+        // ====================================================================
+        // LOGIC: CALENDAR VIEW - Preload reservation data for Chekin lookups
+        // ====================================================================
+        const isCalendarPage = currentHost.includes('application.littlehotelier.com')
+            && window.location.pathname.includes('/calendar/');
+
+        if (isCalendarPage) {
+            console.log('📅 LH Calendar: Preload mode activated');
+
+            /**
+             * Store intercepted reservations into GM storage.
+             * Called from the page context via window.postMessage.
+             */
+            const storeCalendarReservations = (reservations) => {
+                if (!reservations || !Array.isArray(reservations)) return;
+
+                let preloaded = GM_getValue(CONFIG.CALENDAR_PRELOAD_KEY, {});
+                if (typeof preloaded === 'string') {
+                    try { preloaded = JSON.parse(preloaded); } catch (e) { preloaded = {}; }
+                }
+
+                const now = Date.now();
+
+                // Clean up expired entries
+                for (const key of Object.keys(preloaded)) {
+                    if (preloaded[key].timestamp && (now - preloaded[key].timestamp > CONFIG.CALENDAR_PRELOAD_TTL)) {
+                        delete preloaded[key];
+                    }
+                }
+
+                let newCount = 0;
+                for (const res of reservations) {
+                    if (!res.uuid) continue;
+
+                    const entry = {
+                        uuid: res.uuid,
+                        propertyUuid: res.propertyUuid,
+                        roomTypeUuid: res.roomTypeUuid,
+                        roomUuid: res.roomUuid,
+                        reservationRoomTypeUuid: res.reservationRoomTypeUuid,
+                        checkInDate: res.checkInDate,
+                        checkOutDate: res.checkOutDate,
+                        bookingReferenceId: res.bookingReferenceId,
+                        firstName: res.firstName,
+                        lastName: res.lastName,
+                        status: res.status,
+                        checkedIn: res.checkedIn,
+                        checkedOut: res.checkedOut,
+                        paymentStatus: res.paymentStatus,
+                        timestamp: now
+                    };
+
+                    // Key by UUID (used in reservation edit URLs)
+                    preloaded[res.uuid] = entry;
+
+                    // Also key by bookingReferenceId for direct booking ref lookups
+                    if (res.bookingReferenceId) {
+                        preloaded['ref_' + res.bookingReferenceId] = entry;
+                    }
+
+                    newCount++;
+                }
+
+                GM_setValue(CONFIG.CALENDAR_PRELOAD_KEY, preloaded);
+                console.log(`📅 LH Calendar: Stored ${newCount} reservations in GM storage`);
+            };
+
+            /**
+             * Batch-check which calendar reservations are missing from Chekin.
+             * Opens a background Chekin tab that fetches all reservations for the
+             * visible date range, then diffs against the calendar data.
+             */
+            const checkMissingChekinReservations = (reservations) => {
+                if (!reservations || !Array.isArray(reservations)) return;
+
+                // Extract propertyId from the calendar URL
+                const propMatch = window.location.pathname.match(/\/properties\/([^/]+)\/calendar/);
+                const propertyId = propMatch ? propMatch[1] : 'UNKNOWN';
+
+                // Filter out cancelled / declined / no-show
+                const activeReservations = reservations.filter(res =>
+                    res.status !== 'cancelled'
+                    && res.status !== 'declined'
+                    && res.status !== 'no_show'
+                );
+
+                if (activeReservations.length === 0) return;
+
+                // Find the date range of visible reservations
+                const checkInDates = activeReservations
+                    .map(r => r.checkInDate)
+                    .filter(Boolean)
+                    .sort();
+
+                if (checkInDates.length === 0) return;
+
+                const dateFrom = checkInDates[0];
+                const dateTo = checkInDates[checkInDates.length - 1];
+
+                // Store the batch request
+                GM_setValue('chekin_batch_request', {
+                    dateFrom,
+                    dateTo,
+                    reservations: activeReservations.map(r => ({
+                        uuid: r.uuid,
+                        bookingReferenceId: r.bookingReferenceId,
+                        firstName: r.firstName,
+                        lastName: r.lastName,
+                        checkInDate: r.checkInDate,
+                        checkOutDate: r.checkOutDate,
+                        status: r.status,
+                    })),
+                    propertyId,
+                    timestamp: Date.now()
+                });
+
+                // Clean previous response BEFORE setting up the listener
+                // (otherwise deleting triggers the listener with null)
+                GM_deleteValue('chekin_batch_response');
+
+                // Listen for batch check results
+                const listenerId = GM_addValueChangeListener('chekin_batch_response', (_key, _oldVal, newVal) => {
+                    if (!newVal) return; // Ignore delete events
+                    GM_removeValueChangeListener(listenerId);
+
+                    console.log('📅 Batch response received:', JSON.stringify(newVal));
+
+                    if (newVal.status === 'error') {
+                        console.warn('📅 ❌ Chekin batch check failed:', newVal?.msg || 'unknown error');
+                        return;
+                    }
+
+                    if (newVal.status === 'login_required') {
+                        console.warn('📅 ⚠️ Chekin login required — cannot check missing reservations. Please log in to dashboard.chekin.com');
+                        return;
+                    }
+
+                    if (newVal.status === 'success') {
+                        const chekinRefs = new Set((newVal.bookingRefs || []).map(r => r.toLowerCase().trim()));
+
+                        // Find LH reservations NOT matched in Chekin
+                        const missing = activeReservations.filter(res => {
+                            if (!res.bookingReferenceId) return true; // No ref → can't match
+                            return !chekinRefs.has(res.bookingReferenceId.toLowerCase().trim());
+                        });
+
+                        if (missing.length === 0) {
+                            console.log('📅 ✅ All active reservations have a Chekin reservation linked!');
+                            return;
+                        }
+
+                        console.log(
+                            `%c📅 ⚠️ ${missing.length} reservation(s) missing from Chekin (${dateFrom} — ${dateTo})`,
+                            'font-weight: bold; color: #ff9800; font-size: 13px'
+                        );
+                        console.groupCollapsed(`📅 Click to see ${missing.length} reservation(s) without Chekin registration`);
+                        for (const res of missing) {
+                            const editUrl = `https://app.littlehotelier.com/extranet/properties/${propertyId}/reservations/${res.uuid}/edit`;
+                            const name = `${res.firstName || ''} ${res.lastName || ''}`.trim() || '(no name)';
+                            console.log(
+                                `%c${name}%c — ref: ${res.bookingReferenceId || '(none)'} — ${res.checkInDate || '?'} → ${res.checkOutDate || '?'}\n%c${editUrl}`,
+                                'font-weight: bold; color: #2196F3',
+                                'color: inherit',
+                                'color: #666; text-decoration: underline'
+                            );
+                        }
+                        console.groupEnd();
+                    }
+                });
+
+                // Open Chekin background tab for batch checking
+                const batchUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autobatchcheck=true&dateFrom=${encodeURIComponent(dateFrom)}&dateTo=${encodeURIComponent(dateTo)}`;
+                console.log('📅 Opening Chekin batch check for dates:', dateFrom, '→', dateTo);
+                GM_openInTab(batchUrl, { active: false, insert: true, setParent: true });
+            };
+
+            // Listen for messages from the injected page-context interceptor
+            window.addEventListener('message', (event) => {
+                if (event.data && event.data.type === 'LH_CALENDAR_RESERVATIONS') {
+                    storeCalendarReservations(event.data.reservations);
+                    checkMissingChekinReservations(event.data.reservations);
+                }
+            });
+
+            // Inject fetch interceptor into the page context
+            const injectCalendarInterceptor = () => {
+                if (document.head || document.documentElement) {
+                    const target = document.head || document.documentElement;
+                    const script = document.createElement('script');
+                    script.textContent = `
+                        (function() {
+                            const originalFetch = window.fetch;
+
+                            window.fetch = async function(...args) {
+                                const response = await originalFetch.apply(this, args);
+
+                                try {
+                                    const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : '');
+                                    const body = args[1]?.body;
+
+                                    // Detect GraphQL reservations query
+                                    if (url.includes('/extranet-beef/api/graphql') && body) {
+                                        let parsedBody;
+                                        try {
+                                            parsedBody = typeof body === 'string' ? JSON.parse(body) : body;
+                                        } catch(e) { /* not JSON */ }
+
+                                        if (parsedBody && parsedBody.operationName === 'reservations') {
+                                            const clone = response.clone();
+                                            clone.json().then(data => {
+                                                if (data && data.data && data.data.reservations) {
+                                                    const reservations = data.data.reservations;
+                                                    console.log('📅 LH Calendar: Intercepted ' + reservations.length + ' reservations from GraphQL');
+
+                                                    // Send to userscript context via postMessage
+                                                    // (page context cannot access GM_setValue)
+                                                    window.postMessage({
+                                                        type: 'LH_CALENDAR_RESERVATIONS',
+                                                        reservations: reservations
+                                                    }, '*');
+                                                }
+                                            }).catch(function(err) {
+                                                console.warn('📅 LH Calendar: Error parsing GraphQL response', err);
+                                            });
+                                        }
+                                    }
+                                } catch(e) {
+                                    // Don't break the original fetch
+                                }
+
+                                return response;
+                            };
+
+                            console.log('📅 LH Calendar: Fetch interceptor installed');
+                        })();
+                    `;
+                    target.appendChild(script);
+                    script.remove();
+                } else {
+                    requestAnimationFrame(injectCalendarInterceptor);
+                }
+            };
+
+            injectCalendarInterceptor();
+
+            // Calendar preload mode only — don't run reservation detail logic
+            return;
+        }
+
+        /**
+         * Look up preloaded reservation data from the calendar view.
+         * The calendar script stores reservation data in localStorage keyed by UUID.
+         * The reservation edit URL contains the UUID, so we can look it up directly.
+         */
+        const getPreloadedReservationData = () => {
+            try {
+                // Extract reservation UUID from the edit URL
+                // URL pattern: /extranet/properties/{propId}/reservations/{resUuid}/edit
+                const urlMatch = window.location.pathname.match(/\/reservations\/([0-9a-f-]+)\//i);
+                if (!urlMatch) return null;
+
+                const reservationUuid = urlMatch[1];
+
+                // Use GM_getValue since calendar (application.littlehotelier.com)
+                // and reservation edit (app.littlehotelier.com) are different origins
+                let preloaded = GM_getValue(CONFIG.CALENDAR_PRELOAD_KEY, {});
+                if (typeof preloaded === 'string') {
+                    preloaded = JSON.parse(preloaded);
+                }
+                const entry = preloaded[reservationUuid];
+
+                if (!entry) return null;
+
+                // Check TTL
+                if (entry.timestamp && (Date.now() - entry.timestamp > CONFIG.CALENDAR_PRELOAD_TTL)) {
+                    console.log('📅 Preloaded data expired for', reservationUuid);
+                    return null;
+                }
+
+                console.log('📅 Found preloaded reservation data:', entry);
+                return entry;
+            } catch (e) {
+                console.warn('📅 Error reading preloaded data:', e);
+                return null;
+            }
+        };
+
+        // Try to set booking ref from preloaded calendar data immediately
+        const preloadedData = getPreloadedReservationData();
+        if (preloadedData && preloadedData.bookingReferenceId) {
+            document.documentElement.setAttribute('data-lh-booking-ref', preloadedData.bookingReferenceId);
+            console.log('📅 Set booking ref from calendar preload:', preloadedData.bookingReferenceId);
+        }
 
         const injectWhenReady = () => {
             if (document.head || document.documentElement) {
@@ -943,13 +1241,131 @@ function run() {
         const urlParams = new URLSearchParams(window.location.search);
         const isAutoSearch = urlParams.get('autosearch') === 'true';
         const isAutoCreate = urlParams.get('autocreate') === 'true';
+        const isAutoBatchCheck = urlParams.get('autobatchcheck') === 'true';
         const targetDate = urlParams.get('date');
         const targetRooms = urlParams.get('rooms')?.split(',') || [];
         const targetRef = urlParams.get('ref') || '';
 
-        if (!isAutoSearch && !isAutoCreate) return;
+        if (!isAutoSearch && !isAutoCreate && !isAutoBatchCheck) return;
 
-        console.log('🔍 Chekin mode:', { isAutoSearch, isAutoCreate, targetDate, targetRooms, targetRef });
+        console.log('🔍 Chekin mode:', { isAutoSearch, isAutoCreate, isAutoBatchCheck, targetDate, targetRooms, targetRef });
+
+        // ====================================================================
+        // BATCH CHECK MODE — Fetch all Chekin reservations for a date range
+        // and return booking references to the calendar page
+        // ====================================================================
+        if (isAutoBatchCheck) {
+            const dateFrom = urlParams.get('dateFrom');
+            const dateTo = urlParams.get('dateTo');
+            console.log('📋 Batch check mode for:', dateFrom, '→', dateTo);
+
+            // Validate request freshness
+            const batchRequest = GM_getValue('chekin_batch_request');
+            if (!batchRequest || (Date.now() - batchRequest.timestamp > 90000)) {
+                console.log('🚫 Batch request expired or not found');
+                return;
+            }
+
+            // Check login status after page loads
+            const checkBatchLogin = () => {
+                if (document.querySelector('input[type="password"]') ||
+                    document.body.innerText.includes('Login') ||
+                    document.body.innerText.includes('Sign in')) {
+                    GM_setValue('chekin_batch_response', { status: 'login_required' });
+                    return true;
+                }
+                return false;
+            };
+
+            let batchProcessed = false;
+            const originalFetchBatch = unsafeWindow.fetch;
+
+            unsafeWindow.fetch = async function (input, init) {
+                let url = typeof input === 'string' ? input : (input instanceof Request ? input.url : '');
+
+                // Intercept the reservations API call and expand date range
+                if (url.includes('/api/v4/status/reservations/') && !batchProcessed) {
+                    try {
+                        const urlObj = new URL(url);
+                        urlObj.searchParams.set('page_size', '200');
+                        urlObj.searchParams.set('check_in_date_from', dateFrom + 'T00:00:00');
+                        urlObj.searchParams.set('check_in_date_until', dateTo + 'T23:59:59');
+
+                        const modifiedUrl = urlObj.toString();
+                        console.log('📋 Batch check: Fetching Chekin reservations for date range:', modifiedUrl);
+
+                        if (input instanceof Request) {
+                            input = new Request(modifiedUrl, input);
+                        } else {
+                            input = modifiedUrl;
+                        }
+                    } catch (e) {
+                        console.error('Error modifying batch check URL:', e);
+                    }
+                }
+
+                const response = await originalFetchBatch(input || url, init);
+
+                // Capture the reservations response for batch checking
+                if (url.includes('/api/v4/status/reservations/') && !batchProcessed) {
+                    const clone = response.clone();
+                    clone.json().then(data => {
+                        if (batchProcessed) return;
+                        batchProcessed = true;
+
+                        console.log('📋 Batch check: Received Chekin reservations:', data);
+
+                        if (data.results) {
+                            // Collect all booking references from Chekin reservations
+                            const bookingRefs = [];
+                            for (const res of data.results) {
+                                if (res.external_id) bookingRefs.push(res.external_id);
+                                if (res.booking_reference) bookingRefs.push(res.booking_reference);
+                                if (res.external_booking_reference) bookingRefs.push(res.external_booking_reference);
+                                if (res.reference) bookingRefs.push(res.reference);
+                            }
+
+                            console.log(`📋 Batch check: Found ${data.results.length} Chekin reservations with refs:`, bookingRefs);
+
+                            GM_setValue('chekin_batch_response', {
+                                status: 'success',
+                                bookingRefs: [...new Set(bookingRefs)], // Deduplicate
+                                totalChekinReservations: data.results.length
+                            });
+                        } else {
+                            GM_setValue('chekin_batch_response', {
+                                status: 'success',
+                                bookingRefs: [],
+                                totalChekinReservations: 0
+                            });
+                        }
+
+                        console.log('📋 Batch check: DONE — response sent. Tab will stay open for debugging.');
+                        debugger; // ← Open DevTools in this tab to pause here and inspect logs
+                        setTimeout(() => window.close(), 30000); // 30s to allow debugging
+                    }).catch(err => {
+                        console.error('📋 Batch check: Error parsing response:', err);
+                        GM_setValue('chekin_batch_response', { status: 'error', msg: err.message });
+                        debugger; // ← Open DevTools in this tab to pause here and inspect logs
+                        setTimeout(() => window.close(), 30000); // 30s to allow debugging
+                    });
+                }
+
+                return response;
+            };
+
+            // Check login after page loads
+            setTimeout(() => {
+                if (checkBatchLogin()) {
+                    debugger; // ← Open DevTools in this tab to pause here and inspect logs
+                    setTimeout(() => window.close(), 30000); // 30s to allow debugging
+                }
+            }, 5000);
+
+            return; // Don't execute normal search/create logic
+        }
+
+
 
         // Check login status
         const checkLoginStatus = () => {
