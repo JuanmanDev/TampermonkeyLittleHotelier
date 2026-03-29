@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.3.0
+// @version      1.3.1
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception. Loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -510,10 +510,55 @@ function run() {
             const email = document.querySelector('#guest_email')?.value || '';
             const phone = document.querySelector('#guest_phone_number')?.value || '';
 
-            // Get guests count
-            const adults = parseInt(document.querySelector('#reservation_number_adults')?.value || '1', 10);
-            const children = parseInt(document.querySelector('#reservation_number_children')?.value || '0', 10);
-            const numberOfGuests = (adults + children).toString();
+            // Get guests count — sum across all room types for multi-room reservations
+            let totalAdults = 0;
+            let totalChildren = 0;
+
+            // Strategy 1: Sum per-room adults and children from each room type block
+            const roomTypeBlocks = document.querySelectorAll('.reservation-room-type, .room-type-block, [data-room-type]');
+            if (roomTypeBlocks.length > 0) {
+                roomTypeBlocks.forEach(block => {
+                    const blockAdults = parseInt(
+                        block.querySelector('input[name*="number_adults"], select[name*="number_adults"]')?.value || '0', 10
+                    );
+                    const blockChildren = parseInt(
+                        block.querySelector('input[name*="number_children"], select[name*="number_children"]')?.value || '0', 10
+                    );
+                    totalAdults += blockAdults;
+                    totalChildren += blockChildren;
+                });
+            }
+
+            // Strategy 2: Sum from all per-room inputs matching the array naming convention
+            if (totalAdults === 0) {
+                const perRoomAdultsInputs = document.querySelectorAll(
+                    'input[name="reservation_room_types[][number_adults]"], select[name="reservation_room_types[][number_adults]"]'
+                );
+                const perRoomChildrenInputs = document.querySelectorAll(
+                    'input[name="reservation_room_types[][number_children]"], select[name="reservation_room_types[][number_children]"]'
+                );
+                perRoomAdultsInputs.forEach(input => {
+                    totalAdults += parseInt(input.value || '0', 10);
+                });
+                perRoomChildrenInputs.forEach(input => {
+                    totalChildren += parseInt(input.value || '0', 10);
+                });
+            }
+
+            // Strategy 3: Fallback to reservation-level totals
+            if (totalAdults === 0) {
+                totalAdults = parseInt(document.querySelector('#reservation_number_adults')?.value || '0', 10);
+                totalChildren = parseInt(document.querySelector('#reservation_number_children')?.value || '0', 10);
+            }
+
+            // Strategy 4: Count existing guest forms as last resort
+            if (totalAdults === 0) {
+                const guestForms = document.querySelectorAll('.guest-form');
+                totalAdults = Math.max(guestForms.length, 1); // At least 1 guest
+            }
+
+            const numberOfGuests = Math.max(totalAdults + totalChildren, 1).toString();
+            console.log(`🏨 Guest count: ${totalAdults} adults + ${totalChildren} children = ${numberOfGuests} total`);
 
             // Get Source / Channel
             const channelSelect = document.querySelector('#reservation_channel_id');
@@ -913,6 +958,108 @@ function run() {
             return (str || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
         };
 
+        // Spanish provinces list — must match easySaveProvinceCountry.user.js
+        const SPANISH_PROVINCES = [
+            "A Coruña", "Álava", "Albacete", "Alicante", "Almería", "Asturias", "Ávila", "Badajoz", "Barcelona", "Burgos",
+            "Cáceres", "Cádiz", "Cantabria", "Castellón", "Ceuta", "Ciudad Real", "Córdoba", "Cuenca", "Girona", "Granada",
+            "Guadalajara", "Gipuzkoa", "Huelva", "Huesca", "Illes Balears", "Jaén", "La Rioja", "Las Palmas", "León", "Lleida",
+            "Lugo", "Madrid", "Málaga", "Melilla", "Murcia", "Navarra", "Ourense", "Palencia", "Pontevedra", "Salamanca",
+            "Santa Cruz de Tenerife", "Segovia", "Sevilla", "Soria", "Tarragona", "Teruel", "Toledo", "Valencia", "Valladolid",
+            "Zamora", "Zaragoza"
+        ];
+
+        /**
+         * Try to match a province string from Chekin to one of the canonical
+         * Spanish province names. Uses accent-insensitive comparison, then
+         * partial/contains matching as a fallback.
+         * @param {string} rawProvince - Province string from Chekin
+         * @returns {string|null} Matched canonical province name, or null
+         */
+        const matchSpanishProvince = (rawProvince) => {
+            if (!rawProvince) return null;
+
+            // Clean Chekin's annotation format: "Barcelona (ca) [Barcelona]" → "Barcelona"
+            // Strip content in parentheses and brackets
+            const cleaned = rawProvince
+                .replace(/\s*\([^)]*\)/g, '')   // Remove (ca), (es), etc.
+                .replace(/\s*\[[^\]]*\]/g, '')   // Remove [Barcelona], etc.
+                .replace(/["']/g, '')            // Remove stray quotes
+                .trim();
+
+            // Try the cleaned version first
+            const normCleaned = normalizeString(cleaned);
+            if (normCleaned) {
+                for (const p of SPANISH_PROVINCES) {
+                    if (normalizeString(p) === normCleaned) return p;
+                }
+            }
+
+            // Fall back to the raw version for fuzzy matching
+            const norm = normalizeString(rawProvince);
+            if (!norm) return null;
+
+            // 1. Exact match (accent-insensitive)
+            for (const p of SPANISH_PROVINCES) {
+                if (normalizeString(p) === norm) return p;
+            }
+
+            // 2. One contains the other (handles "Islas Baleares" → "Illes Balears", etc.)
+            for (const p of SPANISH_PROVINCES) {
+                const np = normalizeString(p);
+                if (np.includes(norm) || norm.includes(np)) return p;
+            }
+
+            // 3. Word-level overlap (at least one significant word matches)
+            const normWords = norm.split(/\s+/).filter(w => w.length > 2);
+            for (const p of SPANISH_PROVINCES) {
+                const pWords = normalizeString(p).split(/\s+/).filter(w => w.length > 2);
+                for (const nw of normWords) {
+                    for (const pw of pWords) {
+                        if (nw === pw) return p;
+                    }
+                }
+            }
+
+            // 4. Common alternative names mapping
+            const alternativeNames = {
+                'vizcaya': 'Álava', // Bizkaia often grouped but distinct
+                'bizkaia': 'Álava',
+                'guipuzcoa': 'Gipuzkoa',
+                'guipúzcoa': 'Gipuzkoa',
+                'araba': 'Álava',
+                'la coruna': 'A Coruña',
+                'orense': 'Ourense',
+                'gerona': 'Girona',
+                'lerida': 'Lleida',
+                'baleares': 'Illes Balears',
+                'islas baleares': 'Illes Balears',
+                'tenerife': 'Santa Cruz de Tenerife',
+                'gran canaria': 'Las Palmas',
+                'lanzarote': 'Las Palmas',
+                'fuerteventura': 'Las Palmas',
+                'la palma': 'Santa Cruz de Tenerife',
+                'la gomera': 'Santa Cruz de Tenerife',
+                'el hierro': 'Santa Cruz de Tenerife',
+                'ibiza': 'Illes Balears',
+                'mallorca': 'Illes Balears',
+                'menorca': 'Illes Balears',
+                'formentera': 'Illes Balears',
+                'pais vasco': 'Álava',
+                'euskadi': 'Gipuzkoa',
+                'castellon de la plana': 'Castellón',
+                'castello': 'Castellón',
+            };
+            const mapped = alternativeNames[norm];
+            if (mapped) return mapped;
+            // Also try normalized keys
+            for (const [altKey, altVal] of Object.entries(alternativeNames)) {
+                if (normalizeString(altKey) === norm) return altVal;
+            }
+
+            console.log(`⚠️ Could not match province "${rawProvince}" to any Spanish province`);
+            return null;
+        };
+
         const mapDocType = (val) => {
             if (!val) return '';
             val = val.toUpperCase();
@@ -974,6 +1121,15 @@ function run() {
 
                 const matchingForm = findMatchingGuestForm(guest);
                 if (matchingForm) {
+                    // For Spain guests, resolve the province to canonical name
+                    // Check both Chekin's country AND the form's current country value
+                    const guestIsSpain = normalizeString(guest.country || '').match(/^(spain|espana|españa|es)$/);
+                    const formCountryInput = matchingForm.querySelector('input[name="country"], select[name="country"]')
+                        || document.getElementById('guest_country');
+                    const formIsSpain = formCountryInput && normalizeString(formCountryInput.value || '').match(/^(spain|espana|españa|es)$/);
+                    const effectivelySpain = !!(guestIsSpain || formIsSpain);
+                    const resolvedProv = (effectivelySpain && guest.province) ? (matchSpanishProvince(guest.province) || guest.province) : guest.province;
+
                     const checkFields = [
                         { name: 'email', val: guest.email },
                         { name: 'phone_number', val: guest.phone },
@@ -981,6 +1137,7 @@ function run() {
                         { name: 'nationality', val: guest.nationality },
                         { name: 'date_of_birth', val: guest.date_of_birth },
                         { name: 'city', val: guest.city },
+                        { name: 'state', val: resolvedProv, isProvince: true, isSpain: effectivelySpain },
                         { name: 'country', val: guest.country }
                     ];
 
@@ -991,6 +1148,30 @@ function run() {
                             if (input && !input.value) {
                                 canImprove = true;
                                 break;
+                            }
+                            // For Spain province: check the value matches a canonical province
+                            if (field.isProvince && field.isSpain && input && input.value) {
+                                const matchedProv = matchSpanishProvince(input.value);
+                                if (!matchedProv) {
+                                    canImprove = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Additional check: For Spanish guests, LH REQUIRES a valid province.
+                    // Even if Chekin doesn't have province data (field.val is null),
+                    // we must still flag as improvable if the LH form's state field is empty
+                    // or contains an unrecognized value.
+                    if (!canImprove && effectivelySpain) {
+                        const stateInput = matchingForm.querySelector('input[name="state"], select[name="state"]')
+                            || document.getElementById('guest_state');
+                        if (stateInput) {
+                            const currentState = (stateInput.value || '').trim();
+                            if (!currentState || !matchSpanishProvince(currentState)) {
+                                console.log(`⚠️ Spain guest "${guest.first_name} ${guest.last_name}" is missing a valid province in LH (current: "${currentState}")`);
+                                canImprove = true;
                             }
                         }
                     }
@@ -1071,6 +1252,17 @@ function run() {
                 await new Promise(r => setTimeout(r, 300));
             }
 
+            // If country is Spain, try to match the province to the canonical list
+            const isSpain = normalizeString(guest.country || '').match(/^(spain|espana|españa|es)$/);
+            let resolvedProvince = guest.province;
+            if (isSpain && guest.province) {
+                const matched = matchSpanishProvince(guest.province);
+                if (matched) {
+                    console.log(`🇪🇸 Province matched: "${guest.province}" → "${matched}"`);
+                    resolvedProvince = matched;
+                }
+            }
+
             const fieldMapping = [
                 { name: 'first_name', id: 'guest_first_name', val: guest.first_name },
                 { name: 'last_name', id: 'guest_last_name', val: guest.last_name },
@@ -1087,17 +1279,69 @@ function run() {
                 { name: 'address', id: 'guest_address', val: guest.address },
                 { name: 'country', id: 'guest_country', val: guest.country },
                 { name: 'city', id: 'guest_city', val: guest.city },
-                { name: 'state', id: 'guest_state', val: guest.province },
+                { name: 'state', id: 'guest_state', val: resolvedProvince },
                 { name: 'post_code', id: 'guest_post_code', val: guest.post_code }
             ];
 
             for (const field of fieldMapping) {
                 if (!field.val) continue;
                 let input = targetForm.querySelector(`input[name="${field.name}"], select[name="${field.name}"], input[id="${field.id}"], select[id="${field.id}"]`);
+                if (!input && field.id) {
+                    input = document.getElementById(field.id);
+                }
                 if (input) {
                     triggerVueUpdate(input, field.val);
                 }
             }
+
+            // Re-apply province after delay to survive Vue's re-render
+            // When country changes to Spain, Vue re-renders and REPLACES the state input element.
+            // We must re-query the DOM inside each callback — a captured reference goes stale.
+            if (resolvedProvince) {
+                /**
+                 * Re-query the state input from the live DOM. The element captured before
+                 * the country change is detached by Vue's re-render, so we always query fresh.
+                 */
+                const findStateInput = () => {
+                    return targetForm.querySelector('input[name="state"]')
+                        || targetForm.querySelector('input[id="guest_state"]')
+                        || document.getElementById('guest_state')
+                        || document.querySelector('input[name="state"].form-control');
+                };
+
+                const applyProvince = (delay) => {
+                    setTimeout(() => {
+                        const currentInput = findStateInput();
+                        if (!currentInput) {
+                            console.warn(`🇪🇸 State input not found after ${delay}ms — DOM may not be ready yet`);
+                            return;
+                        }
+                        if (!currentInput.value || (isSpain && !matchSpanishProvince(currentInput.value))) {
+                            console.log(`🇪🇸 Re-applying province "${resolvedProvince}" after ${delay}ms delay (input value was "${currentInput.value}")`);
+                            triggerVueUpdate(currentInput, resolvedProvince);
+                        }
+                    }, delay);
+                };
+
+                // Multiple re-applications at staggered intervals to survive Vue re-renders
+                // Longer delays needed because Vue's country-change re-render can take 500ms+
+                for (const delay of [100, 300, 600, 1000, 1500]) {
+                    applyProvince(delay);
+                }
+
+                // Also watch for DOM mutations in case Vue re-renders even later
+                const observer = new MutationObserver(() => {
+                    const currentInput = findStateInput();
+                    if (currentInput && (!currentInput.value || (isSpain && !matchSpanishProvince(currentInput.value)))) {
+                        console.log(`🇪🇸 MutationObserver: Re-applying province "${resolvedProvince}"`);
+                        triggerVueUpdate(currentInput, resolvedProvince);
+                    }
+                });
+                observer.observe(targetForm, { childList: true, subtree: true });
+                // Stop watching after 3 seconds to avoid performance issues
+                setTimeout(() => observer.disconnect(), 3000);
+            }
+
             console.log("Guest form filled with data:", guest);
         };
 
@@ -1162,8 +1406,9 @@ function run() {
                     evt.preventDefault();
                     for (const guest of data) {
                         await fillGuestForm(guest);
+                        // Wait for Vue re-render + province re-application (longest delay is 1500ms)
+                        await new Promise(r => setTimeout(r, 2000));
                         updateGuestButtonsState(container, data);
-                        await new Promise(r => setTimeout(r, 600));
                     }
                 };
             }
@@ -1175,6 +1420,8 @@ function run() {
                 btn.onclick = async (evt) => {
                     evt.preventDefault();
                     await fillGuestForm(data[index]);
+                    // Wait for Vue re-render + province re-application (longest delay is 1500ms)
+                    await new Promise(r => setTimeout(r, 2000));
                     updateGuestButtonsState(container, data);
                 };
             });
