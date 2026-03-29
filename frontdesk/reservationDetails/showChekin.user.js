@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.3.1
+// @version      1.4.0
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception. Loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -9,6 +9,7 @@
 // @match        https://dashboard.chekin.com/bookings?autosearch=true*
 // @match        https://dashboard.chekin.com/bookings?autocreate=true*
 // @match        https://dashboard.chekin.com/bookings?autobatchcheck=true*
+// @match        https://dashboard.chekin.com/bookings?autopreloadall=true*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=littlehotelier.com
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -137,6 +138,112 @@ function run() {
         if (isCalendarPage) {
             console.log('📅 LH Calendar: Preload mode activated');
 
+            let latestCalendarReservations = [];
+            let auditBtn = null;
+            let preloadBtn = null;
+
+            const createAuditUI = () => {
+                if (document.getElementById('chekin-audit-btn')) return;
+
+                auditBtn = document.createElement('button');
+                auditBtn.id = 'chekin-audit-btn';
+                auditBtn.innerText = '🔍 Audit Chekin (0)';
+                auditBtn.style.position = 'fixed';
+                auditBtn.style.bottom = '20px';
+                auditBtn.style.right = '20px';
+                auditBtn.style.zIndex = '999999';
+                auditBtn.style.padding = '12px 18px';
+                auditBtn.style.backgroundColor = '#1e88e5';
+                auditBtn.style.color = 'white';
+                auditBtn.style.border = 'none';
+                auditBtn.style.borderRadius = '30px';
+                auditBtn.style.boxShadow = '0 4px 10px rgba(0,0,0,0.3)';
+                auditBtn.style.cursor = 'pointer';
+                auditBtn.style.fontFamily = 'sans-serif';
+                auditBtn.style.fontWeight = 'bold';
+                auditBtn.style.fontSize = '14px';
+                auditBtn.style.transition = 'background 0.2s';
+
+                auditBtn.onmouseenter = () => auditBtn.style.backgroundColor = '#1565c0';
+                auditBtn.onmouseleave = () => auditBtn.style.backgroundColor = '#1e88e5';
+
+                auditBtn.onclick = () => {
+                    if (latestCalendarReservations.length === 0) {
+                        alert('⏳ Please wait for the calendar reservations to load...');
+                        return;
+                    }
+                    const btnOriginalText = auditBtn.innerText;
+                    auditBtn.innerText = '⏳ Checking...';
+                    auditBtn.disabled = true;
+
+                    checkMissingChekinReservations(latestCalendarReservations, () => {
+                        auditBtn.innerText = btnOriginalText;
+                        auditBtn.disabled = false;
+                    });
+                };
+
+                preloadBtn = document.createElement('button');
+                preloadBtn.id = 'chekin-preload-btn';
+                preloadBtn.innerText = '⚡ Preload Guests';
+                preloadBtn.style.cssText = auditBtn.style.cssText;
+                preloadBtn.style.bottom = '70px'; // Position above audit button
+                preloadBtn.style.backgroundColor = '#4CAF50';
+
+                preloadBtn.onmouseenter = () => preloadBtn.style.backgroundColor = '#388E3C';
+                preloadBtn.onmouseleave = () => preloadBtn.style.backgroundColor = '#4CAF50';
+
+                preloadBtn.onclick = () => {
+                    if (latestCalendarReservations.length === 0) {
+                        alert('⏳ Please wait for the calendar reservations to load...');
+                        return;
+                    }
+
+                    const activeReservations = latestCalendarReservations.filter(res =>
+                        res.status !== 'cancelled' && res.status !== 'declined' && res.status !== 'no_show'
+                    );
+
+                    if (activeReservations.length === 0) {
+                        alert('✅ No active reservations to preload.');
+                        return;
+                    }
+
+                    const checkInDates = activeReservations.map(r => r.checkInDate).filter(Boolean).sort();
+                    if (checkInDates.length === 0) return;
+
+                    const dateFrom = checkInDates[0];
+                    const dateTo = checkInDates[checkInDates.length - 1];
+
+                    // Store request to validate the popup
+                    GM_setValue('chekin_preload_request', {
+                        timestamp: Date.now(),
+                        dateFrom,
+                        dateTo
+                    });
+
+                    const preloadUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autopreloadall=true&dateFrom=${encodeURIComponent(dateFrom)}&dateTo=${encodeURIComponent(dateTo)}`;
+                    console.log('📅 Opening Chekin preload all for dates:', dateFrom, '→', dateTo);
+                    GM_openInTab(preloadUrl, { active: false, insert: true, setParent: true });
+                };
+
+                // Check if audit UI is enabled via localStorage
+                const isDebugEnabled = localStorage.getItem('LH_CHEKIN_DEBUG') === 'true';
+                if (!isDebugEnabled) {
+                    console.log('%c🔍 LH Chekin: Audit tools are hidden. To enable, run: localStorage.setItem("LH_CHEKIN_DEBUG", "true"); then refresh.', 'color: #1e88e5; font-weight: bold;');
+                }
+
+                auditBtn.style.display = isDebugEnabled ? 'block' : 'none';
+                preloadBtn.style.display = 'none';
+
+                document.body.appendChild(auditBtn);
+                document.body.appendChild(preloadBtn);
+            };
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', createAuditUI);
+            } else {
+                createAuditUI();
+            }
+
             /**
              * Store intercepted reservations into GM storage.
              * Called from the page context via window.postMessage.
@@ -200,8 +307,11 @@ function run() {
              * Opens a background Chekin tab that fetches all reservations for the
              * visible date range, then diffs against the calendar data.
              */
-            const checkMissingChekinReservations = (reservations) => {
-                if (!reservations || !Array.isArray(reservations)) return;
+            const checkMissingChekinReservations = (reservations, onComplete = () => { }) => {
+                if (!reservations || !Array.isArray(reservations)) {
+                    onComplete();
+                    return;
+                }
 
                 // Extract propertyId from the calendar URL
                 const propMatch = window.location.pathname.match(/\/properties\/([^/]+)\/calendar/);
@@ -214,7 +324,11 @@ function run() {
                     && res.status !== 'no_show'
                 );
 
-                if (activeReservations.length === 0) return;
+                if (activeReservations.length === 0) {
+                    alert('✅ No active reservations to audit.');
+                    onComplete();
+                    return;
+                }
 
                 // Find the date range of visible reservations
                 const checkInDates = activeReservations
@@ -222,7 +336,10 @@ function run() {
                     .filter(Boolean)
                     .sort();
 
-                if (checkInDates.length === 0) return;
+                if (checkInDates.length === 0) {
+                    onComplete();
+                    return;
+                }
 
                 const dateFrom = checkInDates[0];
                 const dateTo = checkInDates[checkInDates.length - 1];
@@ -257,11 +374,16 @@ function run() {
 
                     if (newVal.status === 'error') {
                         console.warn('📅 ❌ Chekin batch check failed:', newVal?.msg || 'unknown error');
+                        alert('❌ Chekin batch check failed:\n' + (newVal?.msg || 'unknown error'));
+                        onComplete();
                         return;
                     }
 
                     if (newVal.status === 'login_required') {
                         console.warn('📅 ⚠️ Chekin login required — cannot check missing reservations. Please log in to dashboard.chekin.com');
+                        alert('⚠️ Chekin login required!\n\nPlease log in to dashboard.chekin.com first, then try again.');
+                        GM_openInTab(`https://${CONFIG.CHEKIN_DOMAIN}/bookings`, { active: true });
+                        onComplete();
                         return;
                     }
 
@@ -276,6 +398,8 @@ function run() {
 
                         if (missing.length === 0) {
                             console.log('📅 ✅ All active reservations have a Chekin reservation linked!');
+                            alert('✅ All active reservations currently visible have an associated Chekin registration!');
+                            onComplete();
                             return;
                         }
 
@@ -283,18 +407,39 @@ function run() {
                             `%c📅 ⚠️ ${missing.length} reservation(s) missing from Chekin (${dateFrom} — ${dateTo})`,
                             'font-weight: bold; color: #ff9800; font-size: 13px'
                         );
-                        console.groupCollapsed(`📅 Click to see ${missing.length} reservation(s) without Chekin registration`);
-                        for (const res of missing) {
-                            const editUrl = `https://app.littlehotelier.com/extranet/properties/${propertyId}/reservations/${res.uuid}/edit`;
-                            const name = `${res.firstName || ''} ${res.lastName || ''}`.trim() || '(no name)';
-                            console.log(
-                                `%c${name}%c — ref: ${res.bookingReferenceId || '(none)'} — ${res.checkInDate || '?'} → ${res.checkOutDate || '?'}\n%c${editUrl}`,
-                                'font-weight: bold; color: #2196F3',
-                                'color: inherit',
-                                'color: #666; text-decoration: underline'
-                            );
-                        }
-                        console.groupEnd();
+
+                        // Build UI Modal
+                        const uiHtml = `
+                            <div id="missing-chekins-modal" style="position:fixed;top:60px;right:20px;width:350px;background:#fff;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.25);z-index:999999;font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;border:2px solid #ff9800;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;">
+                                <div style="padding:15px;background:#fff3e0;border-bottom:1px solid #ffe0b2;display:flex;justify-content:space-between;align-items:center;">
+                                    <h3 style="margin:0;color:#e65100;font-size:16px;display:flex;align-items:center;gap:8px;">
+                                        <span style="font-size:20px;">⚠️</span> ${missing.length} Missing from Chekin
+                                    </h3>
+                                    <button onclick="this.closest('#missing-chekins-modal').remove()" style="background:none;border:none;font-size:24px;line-height:1;margin:0;padding:0 5px;cursor:pointer;color:#e65100;opacity:0.6;transition:opacity 0.2s;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.6'">&times;</button>
+                                </div>
+                                <div style="padding:0;overflow-y:auto;flex-grow:1;background:#fafafa;">
+                                    <ul style="list-style:none;margin:0;padding:0;">
+                                        ${missing.map(res => {
+                            const editUrl = 'https://app.littlehotelier.com/extranet/properties/' + propertyId + '/reservations/' + res.uuid + '/edit';
+                            const fullName = ((res.firstName || '') + ' ' + (res.lastName || '')).trim() || '(no name)';
+                            return '<li style="padding:12px 15px;border-bottom:1px solid #eee;background:#fff;transition:background 0.2s;" onmouseenter="this.style.backgroundColor=\'#f5f5f5\'" onmouseleave="this.style.backgroundColor=\'#fff\'">' +
+                                '<a href="' + editUrl + '" target="_blank" style="text-decoration:none;display:block;">' +
+                                '<strong style="display:block;margin-bottom:4px;color:#2196F3;font-size:14px;">' + fullName + '</strong>' +
+                                '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+                                '<span style="font-size:12px;color:#666;background:#f0f0f0;padding:2px 6px;border-radius:4px;font-family:monospace;">' + (res.bookingReferenceId || 'NO REF') + '</span>' +
+                                '<span style="font-size:12px;color:#888;">' + (res.checkInDate || '?') + ' &rarr; ' + (res.checkOutDate || '?') + '</span>' +
+                                '</div>' +
+                                '</a>' +
+                                '</li>';
+                        }).join('')}
+                                    </ul>
+                                </div>
+                            </div>
+                        `;
+                        const oldModal = document.getElementById('missing-chekins-modal');
+                        if (oldModal) oldModal.remove();
+                        document.body.insertAdjacentHTML('beforeend', uiHtml);
+                        onComplete();
                     }
                 });
 
@@ -308,7 +453,43 @@ function run() {
             window.addEventListener('message', (event) => {
                 if (event.data && event.data.type === 'LH_CALENDAR_RESERVATIONS') {
                     storeCalendarReservations(event.data.reservations);
-                    checkMissingChekinReservations(event.data.reservations);
+
+                    const activeCount = event.data.reservations.filter(res =>
+                        res.status !== 'cancelled' && res.status !== 'declined' && res.status !== 'no_show'
+                    ).length;
+
+                    latestCalendarReservations = event.data.reservations;
+                    if (auditBtn) auditBtn.innerText = `🔍 Audit Chekin (${activeCount})`;
+
+                    // Auto-trigger preload, with a 2-second debounce to avoid spamming on rapid scrolls
+                    clearTimeout(window._chekinPreloadTimeout);
+                    window._chekinPreloadTimeout = setTimeout(() => {
+                        const activeReservations = event.data.reservations.filter(res =>
+                            res.status !== 'cancelled' && res.status !== 'declined' && res.status !== 'no_show'
+                        );
+                        if (activeReservations.length === 0) return;
+
+                        const checkInDates = activeReservations.map(r => r.checkInDate).filter(Boolean).sort();
+                        if (checkInDates.length === 0) return;
+                        const dateFrom = checkInDates[0];
+                        const dateTo = checkInDates[checkInDates.length - 1];
+
+                        // Prevent re-running if we already tracked this exact range very recently (within 5 minutes)
+                        const lastReq = window._lastChekinPreloadReq;
+                        if (lastReq && lastReq.dateFrom === dateFrom && lastReq.dateTo === dateTo && (Date.now() - lastReq.timestamp < 300000)) {
+                            return;
+                        }
+                        window._lastChekinPreloadReq = { timestamp: Date.now(), dateFrom, dateTo };
+
+                        GM_setValue('chekin_preload_request', {
+                            timestamp: Date.now(),
+                            dateFrom,
+                            dateTo
+                        });
+                        const preloadUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autopreloadall=true&dateFrom=${encodeURIComponent(dateFrom)}&dateTo=${encodeURIComponent(dateTo)}`;
+                        console.log('📅 Auto-Preloading guests for dates:', dateFrom, '→', dateTo);
+                        GM_openInTab(preloadUrl, { active: false, insert: true, setParent: true });
+                    }, 2000);
                 }
             });
 
@@ -318,52 +499,52 @@ function run() {
                     const target = document.head || document.documentElement;
                     const script = document.createElement('script');
                     script.textContent = `
-                        (function() {
-                            const originalFetch = window.fetch;
+        (function () {
+            const originalFetch = window.fetch;
 
-                            window.fetch = async function(...args) {
-                                const response = await originalFetch.apply(this, args);
+            window.fetch = async function (...args) {
+                const response = await originalFetch.apply(this, args);
 
-                                try {
-                                    const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : '');
-                                    const body = args[1]?.body;
+                try {
+                    const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : '');
+                    const body = args[1]?.body;
 
-                                    // Detect GraphQL reservations query
-                                    if (url.includes('/extranet-beef/api/graphql') && body) {
-                                        let parsedBody;
-                                        try {
-                                            parsedBody = typeof body === 'string' ? JSON.parse(body) : body;
-                                        } catch(e) { /* not JSON */ }
+                    // Detect GraphQL reservations query
+                    if (url.includes('/extranet-beef/api/graphql') && body) {
+                        let parsedBody;
+                        try {
+                            parsedBody = typeof body === 'string' ? JSON.parse(body) : body;
+                        } catch (e) { /* not JSON */ }
 
-                                        if (parsedBody && parsedBody.operationName === 'reservations') {
-                                            const clone = response.clone();
-                                            clone.json().then(data => {
-                                                if (data && data.data && data.data.reservations) {
-                                                    const reservations = data.data.reservations;
-                                                    console.log('📅 LH Calendar: Intercepted ' + reservations.length + ' reservations from GraphQL');
+                        if (parsedBody && parsedBody.operationName === 'reservations') {
+                            const clone = response.clone();
+                            clone.json().then(data => {
+                                if (data && data.data && data.data.reservations) {
+                                    const reservations = data.data.reservations;
+                                    console.log('📅 LH Calendar: Intercepted ' + reservations.length + ' reservations from GraphQL');
 
-                                                    // Send to userscript context via postMessage
-                                                    // (page context cannot access GM_setValue)
-                                                    window.postMessage({
-                                                        type: 'LH_CALENDAR_RESERVATIONS',
-                                                        reservations: reservations
-                                                    }, '*');
-                                                }
-                                            }).catch(function(err) {
-                                                console.warn('📅 LH Calendar: Error parsing GraphQL response', err);
-                                            });
-                                        }
-                                    }
-                                } catch(e) {
-                                    // Don't break the original fetch
+                                    // Send to userscript context via postMessage
+                                    // (page context cannot access GM_setValue)
+                                    window.postMessage({
+                                        type: 'LH_CALENDAR_RESERVATIONS',
+                                        reservations: reservations
+                                    }, '*');
                                 }
+                            }).catch(function (err) {
+                                console.warn('📅 LH Calendar: Error parsing GraphQL response', err);
+                            });
+                        }
+                    }
+                } catch (e) {
+                    // Don't break the original fetch
+                }
 
-                                return response;
-                            };
+                return response;
+            };
 
-                            console.log('📅 LH Calendar: Fetch interceptor installed');
-                        })();
-                    `;
+            console.log('📅 LH Calendar: Fetch interceptor installed');
+        })();
+    `;
                     target.appendChild(script);
                     script.remove();
                 } else {
@@ -427,51 +608,51 @@ function run() {
                 const target = document.head || document.documentElement;
                 const script = document.createElement('script');
                 script.textContent = `
-                    // Try to get ref from initial HTML headers just in case
-                    fetch(location.href, { method: 'HEAD' }).then(res => {
-                        const ref = res.headers.get('reservation_booking_ref') || res.headers.get('reservation-booking-ref');
-                        if (ref) {
-                            document.documentElement.setAttribute('data-lh-booking-ref', ref);
-                            console.log('🏨 Got booking ref from HEAD:', ref);
-                        }
-                    }).catch(() => {});
+    // Try to get ref from initial HTML headers just in case
+    fetch(location.href, { method: 'HEAD' }).then(res => {
+        const ref = res.headers.get('reservation_booking_ref') || res.headers.get('reservation-booking-ref');
+        if (ref) {
+            document.documentElement.setAttribute('data-lh-booking-ref', ref);
+            console.log('🏨 Got booking ref from HEAD:', ref);
+        }
+    }).catch(() => { });
 
-                    const originalOpen = XMLHttpRequest.prototype.open;
-                    XMLHttpRequest.prototype.open = function(method, url) {
-                        this.addEventListener('load', function() {
-                            if (typeof url === 'string' && url.includes('/reservations/') && url.includes('form-info=true')) {
-                                try {
-                                    const data = JSON.parse(this.responseText);
-                                    if (data && data.booking_reference_id) {
-                                        document.documentElement.setAttribute('data-lh-booking-ref', data.booking_reference_id);
-                                        console.log('🏨 Got booking reference ID from XHR API:', data.booking_reference_id);
-                                    }
-                                } catch (e) {}
-                            }
-                        });
-                        originalOpen.apply(this, arguments);
-                    };
-
-                    const originalFetchLH = window.fetch;
-                    if (originalFetchLH) {
-                        window.fetch = async function(...args) {
-                            const response = await originalFetchLH.apply(this, args);
-                            try {
-                                const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : '');
-                                if (url.includes('/reservations/') && url.includes('form-info=true')) {
-                                    const clone = response.clone();
-                                    clone.json().then(data => {
-                                        if (data && data.booking_reference_id) {
-                                            document.documentElement.setAttribute('data-lh-booking-ref', data.booking_reference_id);
-                                            console.log('🏨 Got booking reference ID from fetch API:', data.booking_reference_id);
-                                        }
-                                    }).catch(e => {});
-                                }
-                            } catch (e) {}
-                            return response;
-                        };
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+        this.addEventListener('load', function () {
+            if (typeof url === 'string' && url.includes('/reservations/') && url.includes('form-info=true')) {
+                try {
+                    const data = JSON.parse(this.responseText);
+                    if (data && data.booking_reference_id) {
+                        document.documentElement.setAttribute('data-lh-booking-ref', data.booking_reference_id);
+                        console.log('🏨 Got booking reference ID from XHR API:', data.booking_reference_id);
                     }
-                `;
+                } catch (e) { }
+            }
+        });
+        originalOpen.apply(this, arguments);
+    };
+
+    const originalFetchLH = window.fetch;
+    if (originalFetchLH) {
+        window.fetch = async function (...args) {
+            const response = await originalFetchLH.apply(this, args);
+            try {
+                const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : '');
+                if (url.includes('/reservations/') && url.includes('form-info=true')) {
+                    const clone = response.clone();
+                    clone.json().then(data => {
+                        if (data && data.booking_reference_id) {
+                            document.documentElement.setAttribute('data-lh-booking-ref', data.booking_reference_id);
+                            console.log('🏨 Got booking reference ID from fetch API:', data.booking_reference_id);
+                        }
+                    }).catch(e => { });
+                }
+            } catch (e) { }
+            return response;
+        };
+    }
+    `;
                 target.appendChild(script);
                 script.remove();
             } else {
@@ -506,7 +687,7 @@ function run() {
             // Get guest details
             const firstName = document.querySelector('#guest_first_name')?.value || '';
             const lastName = document.querySelector('#guest_last_name')?.value || '';
-            const fullName = `${firstName} ${lastName}`.trim();
+            const fullName = `${firstName} ${lastName} `.trim();
             const email = document.querySelector('#guest_email')?.value || '';
             const phone = document.querySelector('#guest_phone_number')?.value || '';
 
@@ -582,13 +763,13 @@ function run() {
             container.className = 'fade-in-ui';
             container.style.cssText = 'margin: 10px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 5px;';
             container.innerHTML = `
-                <style>
-                    button.fill-guest, button.fill-all-guests { transition: all 0.35s ease, opacity 0.3s ease; }
-                    .fade-in-ui { animation: fadeIn 0.5s ease-in-out; }
-                    @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
-                    .chekin-spinner { display: inline-block; animation: chekinSpin 1s linear infinite; }
-                    @keyframes chekinSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-                </style>
+        <style>
+        button.fill-guest, button.fill-all-guests { transition: all 0.35s ease, opacity 0.3s ease; }
+        .fade-in-ui { animation: fadeIn 0.5s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+        .chekin-spinner { display: inline-block; animation: chekinSpin 1s linear infinite; }
+        @keyframes chekinSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        </style>
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
                     <img src="https://f.hubspotusercontent10.net/hubfs/8776616/Logo%20nuevo%20azul-1.png" alt="Chekin" style="height: 24px;">
                     <strong>${t.status}</strong>
@@ -598,7 +779,7 @@ function run() {
                 <div id="chekin-details" style="margin-top: 10px;"></div>
                 <div id="chekin-table" style="margin-top: 10px;"></div>
                 <div id="chekin-signup-form" style="margin-top: 10px;"></div>
-            `;
+    `;
 
             const commentBlock = document.querySelector(".primary-contact-panel")?.lastChild;
             if (commentBlock) {
@@ -608,12 +789,28 @@ function run() {
                 containerCheckin.appendChild(container);
             }
 
+            const apiRef = document.documentElement.getAttribute('data-lh-booking-ref') || '';
+            const urlMatch = window.location.pathname.match(/\/reservations\/([^/]+)\//);
+            const targetRef = apiRef || (urlMatch ? urlMatch[1] : '');
+
             // Create cache key based on date and room
             const cacheKey = CONFIG.STORAGE_PREFIX + btoa(`${checkInDate}_${rooms.join('_')}`);
             const cachedData = JSON.parse(localStorage.getItem(cacheKey) || 'null');
             const now = Date.now();
 
-            if (cachedData && cachedData?.data?.length && (now - cachedData.timestamp < CONFIG.CACHE_DURATION)) {
+            // Check Preload Cross-Domain GM storage first
+            let preloadedData = null;
+            if (targetRef) {
+                const gmData = GM_getValue(CONFIG.STORAGE_PREFIX + 'ref_' + targetRef);
+                if (gmData && gmData.data && gmData.data.length && (now - gmData.timestamp < CONFIG.CACHE_DURATION)) {
+                    preloadedData = gmData;
+                }
+            }
+
+            if (preloadedData) {
+                console.log('✅ Loaded data from Preload GM Cache for ref:', targetRef);
+                renderResults(container, preloadedData.data, preloadedData.link, preloadedData.signupFormLink);
+            } else if (cachedData && cachedData?.data?.length && (now - cachedData.timestamp < CONFIG.CACHE_DURATION)) {
                 renderResults(container, cachedData.data, cachedData.link, cachedData.signupFormLink);
             } else {
                 startBackgroundSearch(checkInDate, rooms, container, cacheKey);
@@ -623,14 +820,14 @@ function run() {
         const startBackgroundSearch = (checkInDate, rooms, container, cacheKey) => {
             const statusSpan = container.querySelector('#chekin-status');
             statusSpan.innerHTML = `
-                <style>
-                    @keyframes chekinLoadingBar { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
-                </style>
-                <div style="width: 100px; height: 6px; border-radius: 3px; background: #e0e0e0; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; position: relative;">
-                    <div style="width: 40%; height: 100%; background: #f0ad4e; position: absolute; animation: chekinLoadingBar 1s infinite linear;"></div>
-                </div>
+        <style>
+        @keyframes chekinLoadingBar { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
+        </style>
+        <div style="width: 100px; height: 6px; border-radius: 3px; background: #e0e0e0; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; position: relative;">
+            <div style="width: 40%; height: 100%; background: #f0ad4e; position: absolute; animation: chekinLoadingBar 1s infinite linear;"></div>
+        </div>
                 ${t.searching}
-            `;
+    `;
             statusSpan.style.color = 'orange';
 
             const checkinLink = container.querySelector('#chekin-link');
@@ -1489,11 +1686,12 @@ function run() {
         const isAutoSearch = urlParams.get('autosearch') === 'true';
         const isAutoCreate = urlParams.get('autocreate') === 'true';
         const isAutoBatchCheck = urlParams.get('autobatchcheck') === 'true';
+        const isAutoPreloadAll = urlParams.get('autopreloadall') === 'true';
         const targetDate = urlParams.get('date');
         const targetRooms = urlParams.get('rooms')?.split(',') || [];
         const targetRef = urlParams.get('ref') || '';
 
-        if (!isAutoSearch && !isAutoCreate && !isAutoBatchCheck) return;
+        if (!isAutoSearch && !isAutoCreate && !isAutoBatchCheck && !isAutoPreloadAll) return;
 
         console.log('🔍 Chekin mode:', { isAutoSearch, isAutoCreate, isAutoBatchCheck, targetDate, targetRooms, targetRef });
 
@@ -1587,14 +1785,12 @@ function run() {
                             });
                         }
 
-                        console.log('📋 Batch check: DONE — response sent. Tab will stay open for debugging.');
-                        debugger; // ← Open DevTools in this tab to pause here and inspect logs
-                        setTimeout(() => window.close(), 30000); // 30s to allow debugging
+                        console.log('📋 Batch check: DONE — response sent. Closing tab.');
+                        setTimeout(() => window.close(), 2000);
                     }).catch(err => {
                         console.error('📋 Batch check: Error parsing response:', err);
                         GM_setValue('chekin_batch_response', { status: 'error', msg: err.message });
-                        debugger; // ← Open DevTools in this tab to pause here and inspect logs
-                        setTimeout(() => window.close(), 30000); // 30s to allow debugging
+                        setTimeout(() => window.close(), 2000);
                     });
                 }
 
@@ -1604,8 +1800,194 @@ function run() {
             // Check login after page loads
             setTimeout(() => {
                 if (checkBatchLogin()) {
-                    debugger; // ← Open DevTools in this tab to pause here and inspect logs
-                    setTimeout(() => window.close(), 30000); // 30s to allow debugging
+                    setTimeout(() => window.close(), 2000);
+                }
+            }, 5000);
+
+            return; // Don't execute normal search/create logic
+        }
+
+        // ====================================================================
+        // PRELOAD ALL MODE — Fetch full guest data for all reservations in range
+        // ====================================================================
+        if (isAutoPreloadAll) {
+            const dateFrom = urlParams.get('dateFrom');
+            const dateTo = urlParams.get('dateTo');
+            console.log('📋 Preload All mode for:', dateFrom, '→', dateTo);
+
+            // Validate request freshness
+            const preloadRequest = GM_getValue('chekin_preload_request');
+            if (!preloadRequest || (Date.now() - preloadRequest.timestamp > 90000)) {
+                console.log('🚫 Preload request expired or not found');
+                return;
+            }
+
+            // Check login status after page loads
+            const checkPreloadLogin = () => {
+                if (document.querySelector('input[type="password"]') ||
+                    document.body.innerText.includes('Login') ||
+                    document.body.innerText.includes('Sign in')) {
+                    // If login needed we don't alert loudly as this is a background speedup task
+                    console.warn('⚠️ Login needed for preload data.');
+                    return true;
+                }
+                return false;
+            };
+
+            let preloadProcessed = false;
+            let authToken = null;
+            const originalFetchPreload = unsafeWindow.fetch;
+
+            // Reusable extractToken logic
+            const extractTokenInner = (initObj) => {
+                if (authToken) return;
+                if (initObj && initObj.headers) {
+                    if (typeof initObj.headers.get === 'function') {
+                        const auth = initObj.headers.get('Authorization') || initObj.headers.get('authorization');
+                        if (auth && auth.startsWith('JWT ')) authToken = auth;
+                    } else {
+                        const hdrs = Array.isArray(initObj.headers) ? initObj.headers : Object.entries(initObj.headers);
+                        for (const [k, v] of hdrs) {
+                            if (k.toLowerCase() === 'authorization' && v.startsWith('JWT ')) {
+                                authToken = v;
+                                break;
+                            }
+                        }
+                    }
+                }
+            };
+
+            unsafeWindow.fetch = async function (input, init) {
+                let url = typeof input === 'string' ? input : (input instanceof Request ? input.url : '');
+
+                extractTokenInner(init);
+                if (input instanceof Request) {
+                    extractTokenInner(input);
+                }
+
+                // Intercept the reservations API call and expand date range
+                if (url.includes('/api/v4/status/reservations/') && !preloadProcessed) {
+                    try {
+                        const urlObj = new URL(url);
+                        urlObj.searchParams.set('page_size', '200');
+                        urlObj.searchParams.set('check_in_date_from', dateFrom + 'T00:00:00');
+                        urlObj.searchParams.set('check_in_date_until', dateTo + 'T23:59:59');
+
+                        const modifiedUrl = urlObj.toString();
+                        console.log('📋 Preload All: Fetching reservations batch:', modifiedUrl);
+
+                        if (input instanceof Request) {
+                            input = new Request(modifiedUrl, input);
+                        } else {
+                            input = modifiedUrl;
+                        }
+                    } catch (e) {
+                        console.error('Error modifying preload check URL:', e);
+                    }
+                }
+
+                const response = await originalFetchPreload(input || url, init);
+
+                if (url.includes('/api/v4/status/reservations/') && !preloadProcessed) {
+                    const clone = response.clone();
+                    clone.json().then(async data => {
+                        if (preloadProcessed) return;
+                        preloadProcessed = true;
+
+                        if (!authToken) {
+                            console.warn('📋 Preload All: Auth token not captured, cannot fetch guest details!');
+                            setTimeout(() => window.close(), 2000);
+                            return;
+                        }
+
+                        if (data.results && data.results.length > 0) {
+                            console.log(`📋 Preload All: Processing ${data.results.length} reservations...`);
+
+                            let concurrentLimit = 3; // Keep concurrency low to avoid rate limits
+
+                            for (let i = 0; i < data.results.length; i += concurrentLimit) {
+                                const chunk = data.results.slice(i, i + concurrentLimit);
+
+                                const chunkPromises = chunk.map(async (res) => {
+                                    // Skip if no guests
+                                    if (!res.guests || res.guests.startsWith("0/")) return;
+
+                                    try {
+                                        const guestRes = await originalFetchPreload(
+                                            "https://a.chekin.io/api/v3/guest-groups/" + res.guest_group_id + "/",
+                                            init
+                                        );
+
+                                        if (!guestRes.ok) return;
+                                        const guestDataJson = await guestRes.json();
+
+                                        if (guestDataJson.members && guestDataJson.members.length > 0) {
+                                            const mappedGuestData = guestDataJson.members.map(guest => ({
+                                                full_name: guest.full_name || ((guest.name || '') + ' ' + (guest.surname || '')).trim(),
+                                                first_name: guest.name || '',
+                                                last_name: guest.surname || '',
+                                                second_surname: guest.second_surname || '',
+                                                email: guest.email || '',
+                                                phone: guest.phone?.number ? ((guest.phone.code || '') + guest.phone.number).replace(/\s+/g, '') : (typeof guest.phone === 'string' ? guest.phone.replace(/\s+/g, '') : ''),
+                                                gender: guest.gender?.value === 'M' ? 'Male' : (guest.gender?.value === 'F' ? 'Female' : (guest.gender?.value === 'O' ? 'Other' : '')),
+                                                document_type_raw: guest.document_type?.value || guest.document_type?.label || '',
+                                                document_number: guest.document_number || guest.document?.number || 'N/A',
+                                                nationality: guest.nationality?.name || '',
+                                                date_of_birth: guest.birth_date ? guest.birth_date.split('-').reverse().join('/') : '',
+                                                date_of_issue: guest.document_issue_date ? guest.document_issue_date.split('-').reverse().join('/') : '',
+                                                expiry_date: guest.document_expiration_date ? guest.document_expiration_date.split('-').reverse().join('/') : '',
+                                                address: guest.residence_address || guest.residence?.address || '',
+                                                city: guest.residence_city || guest.residence?.city || '',
+                                                province: guest.residence_province?.name || guest.residence?.details?.division_level_2?.name_es || guest.residence?.details?.division_level_2?.name_eng || '',
+                                                country: guest.residence_country?.name || guest.residence?.country?.name || '',
+                                                country_code: guest.residence_country?.alpha_3 || guest.residence?.country?.alpha_3 || '',
+                                                post_code: guest.residence_postal_code || guest.residence?.postal_code || '',
+                                                raw_data: guest
+                                            }));
+
+                                            const link = "https://dashboard.chekin.com/bookings/" + res.id;
+
+                                            const entry = {
+                                                status: 'success',
+                                                timestamp: Date.now(),
+                                                data: mappedGuestData,
+                                                link: link,
+                                                signupFormLink: null
+                                            };
+
+                                            // Save to GM storage just like showChekin expects 'chekin_response' format!
+                                            if (res.booking_reference) GM_setValue(CONFIG.STORAGE_PREFIX + 'ref_' + res.booking_reference, entry);
+                                            if (res.external_id) GM_setValue(CONFIG.STORAGE_PREFIX + 'ref_' + res.external_id, entry);
+                                            if (res.external_booking_reference) GM_setValue(CONFIG.STORAGE_PREFIX + 'ref_' + res.external_booking_reference, entry);
+                                            if (res.reference) GM_setValue(CONFIG.STORAGE_PREFIX + 'ref_' + res.reference, entry);
+
+                                            console.log('✅ Preloaded caching for:', res.booking_reference || res.external_id);
+                                        }
+                                    } catch (err) {
+                                        console.error('Error preloading guest for', res.id, err);
+                                    }
+                                });
+
+                                await Promise.all(chunkPromises);
+                            }
+
+                            console.log('🚀 Preload All Complete!');
+                        }
+
+                        setTimeout(() => window.close(), 2000);
+                    }).catch(err => {
+                        console.error('📋 Preload All: Error parsing response:', err);
+                        setTimeout(() => window.close(), 2000);
+                    });
+                }
+
+                return response;
+            };
+
+            // Check login after page loads
+            setTimeout(() => {
+                if (checkPreloadLogin()) {
+                    setTimeout(() => window.close(), 2000);
                 }
             }, 5000);
 
