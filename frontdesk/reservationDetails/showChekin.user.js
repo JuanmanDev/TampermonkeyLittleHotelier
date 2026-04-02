@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.4.0
+// @version      1.4.1
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception. Loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -1135,8 +1135,13 @@ function run() {
             };
         };
 
-        const triggerVueUpdate = (element, newValue) => {
+        const triggerVueUpdate = (element, newValue, shouldBlur = true) => {
             if (!element) return;
+            // Prevent crashes in React components by focusing element before changing values
+            if (typeof element.focus === 'function') {
+                try { element.focus(); } catch (e) { }
+            }
+
             const isSelect = element.tagName === 'SELECT';
             const prototype = isSelect ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
             const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
@@ -1145,10 +1150,36 @@ function run() {
             } else {
                 element.value = newValue; // Fallback
             }
-            element.dispatchEvent(new Event('input', { bubbles: true }));
-            element.dispatchEvent(new Event('change', { bubbles: true }));
-            element.dispatchEvent(new Event('blur', { bubbles: true }));
-            element.dispatchEvent(new Event('focusout', { bubbles: true }));
+            // Little Hotelier uses a mix of v-model and manual events. 
+            // 'input' and 'change' are generally sufficient for reactivity.
+            try {
+                element.dispatchEvent(new Event('input', { bubbles: true }));
+                element.dispatchEvent(new Event('change', { bubbles: true }));
+            } catch (err) {
+                console.warn('Error dispatching events:', err);
+            }
+
+            // Explicit blur to dismiss any focus-triggered UI (e.g. province popovers or browser autocomplete)
+            if (shouldBlur && typeof element.blur === 'function') {
+                try { element.blur(); } catch (e) { }
+            }
+        };
+
+        const closeExternalPopovers = () => {
+            // Find the easySave popover by its unique signature (non-classed div, high z-index, grid display)
+            // It often contains '.province-item' elements.
+            const popovers = Array.from(document.querySelectorAll('body > div')).filter(div => {
+                const style = div.style;
+                const isHighZ = style.zIndex === '999999';
+                const isGrid = style.display === 'grid';
+                const hasProvinceItems = div.querySelector('.province-item') !== null;
+                return isHighZ && (isGrid || hasProvinceItems);
+            });
+
+            popovers.forEach(p => {
+                p.style.display = 'none';
+                p.style.visibility = 'hidden';
+            });
         };
 
         const normalizeString = (str) => {
@@ -1157,7 +1188,7 @@ function run() {
 
         // Spanish provinces list — must match easySaveProvinceCountry.user.js
         const SPANISH_PROVINCES = [
-            "A Coruña", "Álava", "Albacete", "Alicante", "Almería", "Asturias", "Ávila", "Badajoz", "Barcelona", "Burgos",
+            "A Coruña", "Álava", "Albacete", "Alicante", "Almería", "Asturias", "Ávila", "Badajoz", "Barcelona", "Bizkaia", "Burgos",
             "Cáceres", "Cádiz", "Cantabria", "Castellón", "Ceuta", "Ciudad Real", "Córdoba", "Cuenca", "Girona", "Granada",
             "Guadalajara", "Gipuzkoa", "Huelva", "Huesca", "Illes Balears", "Jaén", "La Rioja", "Las Palmas", "León", "Lleida",
             "Lugo", "Madrid", "Málaga", "Melilla", "Murcia", "Navarra", "Ourense", "Palencia", "Pontevedra", "Salamanca",
@@ -1175,52 +1206,28 @@ function run() {
         const matchSpanishProvince = (rawProvince) => {
             if (!rawProvince) return null;
 
-            // Clean Chekin's annotation format: "Barcelona (ca) [Barcelona]" → "Barcelona"
-            // Strip content in parentheses and brackets
-            const cleaned = rawProvince
-                .replace(/\s*\([^)]*\)/g, '')   // Remove (ca), (es), etc.
-                .replace(/\s*\[[^\]]*\]/g, '')   // Remove [Barcelona], etc.
-                .replace(/["']/g, '')            // Remove stray quotes
+            // 1. Clean annotations like "Barcelona (ca) [Barcelona]" or "Alicante / Alacant"
+            let cleaned = rawProvince
+                .replace(/\([^)]+\)/g, ' ')   // Remove anything in parentheses
+                .replace(/\[[^\]]+\]/g, ' ')  // Remove anything in brackets
+                .replace(/\{[^}]+\}/g, ' ')   // Remove anything in braces
+                .replace(/[^a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]/g, ' ') // Only keep letters and spaces (removes -, /, etc.)
+                .replace(/\s+/g, ' ')
                 .trim();
 
-            // Try the cleaned version first
             const normCleaned = normalizeString(cleaned);
-            if (normCleaned) {
-                for (const p of SPANISH_PROVINCES) {
-                    if (normalizeString(p) === normCleaned) return p;
-                }
-            }
+            const normRaw = normalizeString(rawProvince);
 
-            // Fall back to the raw version for fuzzy matching
-            const norm = normalizeString(rawProvince);
-            if (!norm) return null;
-
-            // 1. Exact match (accent-insensitive)
-            for (const p of SPANISH_PROVINCES) {
-                if (normalizeString(p) === norm) return p;
-            }
-
-            // 2. One contains the other (handles "Islas Baleares" → "Illes Balears", etc.)
+            // 2. Direct exact match
             for (const p of SPANISH_PROVINCES) {
                 const np = normalizeString(p);
-                if (np.includes(norm) || norm.includes(np)) return p;
+                if (np === normCleaned || np === normRaw) return p;
             }
 
-            // 3. Word-level overlap (at least one significant word matches)
-            const normWords = norm.split(/\s+/).filter(w => w.length > 2);
-            for (const p of SPANISH_PROVINCES) {
-                const pWords = normalizeString(p).split(/\s+/).filter(w => w.length > 2);
-                for (const nw of normWords) {
-                    for (const pw of pWords) {
-                        if (nw === pw) return p;
-                    }
-                }
-            }
-
-            // 4. Common alternative names mapping
+            // 3. Alternative names mapping
             const alternativeNames = {
-                'vizcaya': 'Álava', // Bizkaia often grouped but distinct
-                'bizkaia': 'Álava',
+                'vizcaya': 'Bizkaia',
+                'bizkaia': 'Bizkaia',
                 'guipuzcoa': 'Gipuzkoa',
                 'guipúzcoa': 'Gipuzkoa',
                 'araba': 'Álava',
@@ -1245,12 +1252,38 @@ function run() {
                 'euskadi': 'Gipuzkoa',
                 'castellon de la plana': 'Castellón',
                 'castello': 'Castellón',
+                'alicant': 'Alicante',
+                'alacant': 'Alicante'
             };
-            const mapped = alternativeNames[norm];
+
+            const mapped = alternativeNames[normCleaned];
             if (mapped) return mapped;
-            // Also try normalized keys
+
+            // 4. Substring match using word boundaries (avoids "Leon" matching "Pantaleon")
+            for (const p of SPANISH_PROVINCES) {
+                const np = normalizeString(p);
+                // Require exact word match within string
+                const regex = new RegExp(`\\b${np}\\b`, 'i');
+                if (regex.test(normCleaned) || regex.test(normRaw)) return p;
+            }
+
+            // Substring match for alternative names
             for (const [altKey, altVal] of Object.entries(alternativeNames)) {
-                if (normalizeString(altKey) === norm) return altVal;
+                const regex = new RegExp(`\\b${altKey}\\b`, 'i');
+                if (regex.test(normCleaned) || regex.test(normRaw)) return altVal;
+            }
+
+            // 5. Significant word overlap (fallback)
+            const getWords = str => (str || '').split(/\s+/).filter(w => w.length > 3);
+            const normWords = getWords(normCleaned).concat(getWords(normRaw));
+
+            for (const p of SPANISH_PROVINCES) {
+                const pWords = getWords(normalizeString(p));
+                for (const nw of normWords) {
+                    for (const pw of pWords) {
+                        if (nw === pw) return p;
+                    }
+                }
             }
 
             console.log(`⚠️ Could not match province "${rawProvince}" to any Spanish province`);
@@ -1270,24 +1303,14 @@ function run() {
             const normGuestFirst = normalizeString(guest.first_name);
             const normGuestLast = normalizeString(guest.last_name + ' ' + (guest.second_surname || '')).trim();
 
-            const primaryForm = document.querySelector('.primary-contact-panel');
-            if (primaryForm) {
-                const fnameInput = primaryForm.querySelector('#guest_first_name');
-                const lnameInput = primaryForm.querySelector('#guest_last_name');
-                if (fnameInput && lnameInput) {
-                    const normFName = normalizeString(fnameInput.value);
-                    const normLName = normalizeString(lnameInput.value);
-                    if (normFName && normLName) {
-                        const isMatchFirst = normFName.includes(normGuestFirst) || normGuestFirst.includes(normFName);
-                        const isMatchLast = normLName.includes(normalizeString(guest.last_name)) || normalizeString(guest.last_name).includes(normLName);
-                        if (isMatchFirst && isMatchLast) {
-                            return primaryForm;
-                        }
-                    }
-                }
-            }
+            if (!normGuestFirst && !normalizeString(guest.last_name)) return null;
 
-            const forms = Array.from(document.querySelectorAll('.guest-form'));
+            // 1. Prioritize specific guest forms (Additional Guests list)
+            // Use #guests to ensure we are in the guest list and not the totals panel
+            const guestsContainer = document.getElementById('guests');
+            if (!guestsContainer) return null;
+
+            const forms = Array.from(guestsContainer.querySelectorAll('.guest-form'));
             for (const form of forms) {
                 const fNameInput = form.querySelector('input[name="first_name"]');
                 const lNameInput = form.querySelector('input[name="last_name"]');
@@ -1296,13 +1319,14 @@ function run() {
                 const normFName = normalizeString(fNameInput.value);
                 const normLName = normalizeString(lNameInput.value);
 
-                if (normFName && normLName) {
+                if (normFName && normLName && normFName !== '_' && normLName !== '_') {
                     if (normFName.includes(normGuestFirst) || normGuestFirst.includes(normFName)) {
                         const isMatchLName = normLName.includes(normalizeString(guest.last_name)) || normalizeString(guest.last_name).includes(normLName);
                         if (isMatchLName) return form;
                     }
                 }
             }
+
             return null;
         };
 
@@ -1412,15 +1436,35 @@ function run() {
             }
         };
 
-        const fillGuestForm = async (guest) => {
-            let forms = document.querySelectorAll('.guest-form');
-            let targetForm = findMatchingGuestForm(guest);
+        const fillGuestForm = async (guest, index = null) => {
+            const guestsContainer = document.getElementById('guests');
+            if (!guestsContainer) {
+                console.warn("[Chekin] Guests container (#guests) not found");
+            }
+            let forms = Array.from((guestsContainer || document).querySelectorAll('.guest-form'));
+            let targetForm = null;
+
+            // 1. If explicit index provided, use it to target the form in the guest list
+            if (index !== null) {
+                // We no longer target .primary-contact-panel for index === 0.
+                // Instead, we just use the index in the forms array within #guests.
+                if (forms[index]) {
+                    targetForm = forms[index];
+                }
+            }
+
+            // 2. Fallback to name-based matching if index failed or wasn't provided
+            if (!targetForm) {
+                targetForm = findMatchingGuestForm(guest);
+            }
 
             if (!targetForm) {
                 for (let i = forms.length - 1; i >= 0; i--) {
-                    const fname = forms[i].querySelector('input[name="first_name"]')?.value;
-                    const lname = forms[i].querySelector('input[name="last_name"]')?.value;
-                    if (!fname && !lname) {
+                    const fname = (forms[i].querySelector('input[name="first_name"]')?.value || '').trim();
+                    const lname = (forms[i].querySelector('input[name="last_name"]')?.value || '').trim();
+                    const isFnameEmpty = !fname || fname === '_';
+                    const isLnameEmpty = !lname || lname === '_';
+                    if (isFnameEmpty && isLnameEmpty) {
                         targetForm = forms[i];
                         break;
                     }
@@ -1433,7 +1477,7 @@ function run() {
                 if (addBtn) {
                     addBtn.click();
                     await new Promise(r => setTimeout(r, 400));
-                    forms = document.querySelectorAll('.guest-form');
+                    forms = Array.from((guestsContainer || document).querySelectorAll('.guest-form'));
                     targetForm = forms[forms.length - 1];
                 }
             }
@@ -1460,7 +1504,7 @@ function run() {
                 }
             }
 
-            const fieldMapping = [
+            const firstPhaseFields = [
                 { name: 'first_name', id: 'guest_first_name', val: guest.first_name },
                 { name: 'last_name', id: 'guest_last_name', val: guest.last_name },
                 { name: 'second_surname', val: guest.second_surname },
@@ -1473,23 +1517,52 @@ function run() {
                 { name: 'date_of_issue', id: 'guest_date_of_issue', val: guest.date_of_issue },
                 { name: 'expiry_date', id: 'guest_expiry_date', val: guest.expiry_date },
                 { name: 'date_of_birth', id: 'guest_date_of_birth', val: guest.date_of_birth },
+                { name: 'country', id: 'guest_country', val: guest.country }
+            ];
+
+            const secondPhaseFields = [
                 { name: 'address', id: 'guest_address', val: guest.address },
-                { name: 'country', id: 'guest_country', val: guest.country },
                 { name: 'city', id: 'guest_city', val: guest.city },
                 { name: 'state', id: 'guest_state', val: resolvedProvince },
                 { name: 'post_code', id: 'guest_post_code', val: guest.post_code }
             ];
 
-            for (const field of fieldMapping) {
-                if (!field.val) continue;
-                let input = targetForm.querySelector(`input[name="${field.name}"], select[name="${field.name}"], input[id="${field.id}"], select[id="${field.id}"]`);
-                if (!input && field.id) {
-                    input = document.getElementById(field.id);
+            const fillFields = (fields) => {
+                for (const field of fields) {
+                    const valueToSet = field.val || '';
+                    let input = targetForm.querySelector(`input[name="${field.name}"], select[name="${field.name}"], input[id="${field.id}"], select[id="${field.id}"]`);
+
+                    if (input) {
+                        const isContactsTotalsPanel = input.closest('.contacts-totals-panel') !== null;
+                        if (isContactsTotalsPanel) {
+                            if (field.name !== 'id_document_type' && field.name !== 'id_number') {
+                                continue;
+                            }
+                        }
+
+                        const currentValue = input.value ? input.value.trim() : '';
+                        if (currentValue && currentValue !== '_' && currentValue !== 'none') {
+                            continue;
+                        }
+
+                        // Hack for validation: If the input is empty and it's a name field, we set '_' first 
+                        // to ensure the form registers as 'active/edited' if no real name was provided.
+                        if (!valueToSet && (field.name?.includes('name') || field.id?.includes('name'))) {
+                            triggerVueUpdate(input, '_', true);
+                        } else if (valueToSet) {
+                            triggerVueUpdate(input, valueToSet, true);
+                        }
+                    }
                 }
-                if (input) {
-                    triggerVueUpdate(input, field.val);
-                }
-            }
+            };
+
+            // Phase 1: Personal info + Country (setting country makes Vue re-render geo fields)
+            fillFields(firstPhaseFields);
+
+            // Phase 2: Shorter delay (consistent with easySave's working logic)
+            // Setting the province needs to happen after Vue's country-watcher finishes its re-render.
+            await new Promise(r => setTimeout(r, 150));
+            fillFields(secondPhaseFields);
 
             // Re-apply province after delay to survive Vue's re-render
             // When country changes to Spain, Vue re-renders and REPLACES the state input element.
@@ -1500,10 +1573,9 @@ function run() {
                  * the country change is detached by Vue's re-render, so we always query fresh.
                  */
                 const findStateInput = () => {
-                    return targetForm.querySelector('input[name="state"]')
-                        || targetForm.querySelector('input[id="guest_state"]')
-                        || document.getElementById('guest_state')
-                        || document.querySelector('input[name="state"].form-control');
+                    // Strictly scope to the target form's sub-tree to avoid picking primary contact fields.
+                    return targetForm.querySelector('input[name="state"], select[name="state"]')
+                        || targetForm.querySelector('input[id="guest_state"], select[id="guest_state"]');
                 };
 
                 const applyProvince = (delay) => {
@@ -1513,9 +1585,19 @@ function run() {
                             console.warn(`🇪🇸 State input not found after ${delay}ms — DOM may not be ready yet`);
                             return;
                         }
-                        if (!currentInput.value || (isSpain && !matchSpanishProvince(currentInput.value))) {
+
+                        const isContactsTotalsPanel = currentInput.closest('.contacts-totals-panel') !== null;
+                        if (isContactsTotalsPanel) {
+                            return;
+                        }
+
+                        // Close external popovers that might have been triggered by focus/expansion
+                        closeExternalPopovers();
+
+                        const currentValue = currentInput.value ? currentInput.value.trim() : '';
+                        if (!currentValue || currentValue === '_' || currentValue === 'none') {
                             console.log(`🇪🇸 Re-applying province "${resolvedProvince}" after ${delay}ms delay (input value was "${currentInput.value}")`);
-                            triggerVueUpdate(currentInput, resolvedProvince);
+                            triggerVueUpdate(currentInput, resolvedProvince, true);
                         }
                     }, delay);
                 };
@@ -1529,9 +1611,17 @@ function run() {
                 // Also watch for DOM mutations in case Vue re-renders even later
                 const observer = new MutationObserver(() => {
                     const currentInput = findStateInput();
-                    if (currentInput && (!currentInput.value || (isSpain && !matchSpanishProvince(currentInput.value)))) {
-                        console.log(`🇪🇸 MutationObserver: Re-applying province "${resolvedProvince}"`);
-                        triggerVueUpdate(currentInput, resolvedProvince);
+                    if (currentInput) {
+                        const isContactsTotalsPanel = currentInput.closest('.contacts-totals-panel') !== null;
+                        if (isContactsTotalsPanel) {
+                            return;
+                        }
+
+                        const currentValue = currentInput.value ? currentInput.value.trim() : '';
+                        if (!currentValue || currentValue === '_' || currentValue === 'none') {
+                            console.log(`🇪🇸 MutationObserver: Re-applying province "${resolvedProvince}"`);
+                            triggerVueUpdate(currentInput, resolvedProvince);
+                        }
                     }
                 });
                 observer.observe(targetForm, { childList: true, subtree: true });
@@ -1601,9 +1691,85 @@ function run() {
 
                 addAllBtn.onclick = async (evt) => {
                     evt.preventDefault();
-                    for (const guest of data) {
-                        await fillGuestForm(guest);
-                        // Wait for Vue re-render + province re-application (longest delay is 1500ms)
+
+                    // 1. Cleanup duplicate "phantom" autofilled guests before filling!
+                    const guestsContainerWrapper = document.getElementById('guests');
+                    if (guestsContainerWrapper) {
+                        const localForms = Array.from(guestsContainerWrapper.querySelectorAll('.guest-form'));
+                        const seen = new Set();
+                        for (let form of localForms) {
+                            const fname = (form.querySelector('input[name="first_name"]')?.value || '').trim();
+                            const lname = (form.querySelector('input[name="last_name"]')?.value || '').trim();
+                            if (fname.length > 2 || lname.length > 2) {
+                                const key = (fname + '|' + lname).toLowerCase();
+                                if (seen.has(key)) {
+                                    const closeBtn = form.querySelector('.close-rrt:not(.hidden)');
+                                    if (closeBtn) {
+                                        console.log(`🗑️ Removing duplicate guest: ${fname} ${lname}`);
+                                        closeBtn.click();
+                                        await new Promise(r => setTimeout(r, 600));
+                                    } else {
+                                        console.log(`⚠️ Cannot remove duplicate guest: ${fname} ${lname} (button hidden). Clearing instead.`);
+                                        triggerVueUpdate(form.querySelector('input[name="first_name"]'), '_');
+                                        triggerVueUpdate(form.querySelector('input[name="last_name"]'), '_');
+                                        await new Promise(r => setTimeout(r, 400));
+                                    }
+                                } else {
+                                    seen.add(key);
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Pre-create enough blank forms for our data BEFORE we start filling
+                    // This prevents React from completely re-rendering and throwing away data mid-loop
+                    if (guestsContainerWrapper) {
+                        const countForms = Array.from(guestsContainerWrapper.querySelectorAll('.guest-form'));
+                        let matchingOrEmpty = 0;
+                        for (let form of countForms) {
+                            const fname = (form.querySelector('input[name="first_name"]')?.value || '').trim();
+                            const lname = (form.querySelector('input[name="last_name"]')?.value || '').trim();
+
+                            const isFnameEmpty = !fname || fname === '_';
+                            const isLnameEmpty = !lname || lname === '_';
+
+                            if (isFnameEmpty && isLnameEmpty) {
+                                matchingOrEmpty++;
+                                continue;
+                            }
+
+                            for (let guest of data) {
+                                const normGuestFirst = normalizeString(guest.first_name);
+                                const normGuestLast = normalizeString(guest.last_name + ' ' + (guest.second_surname || '')).trim();
+                                const normFName = normalizeString(fname);
+                                const normLName = normalizeString(lname);
+                                if (normFName && normGuestFirst && (normFName.includes(normGuestFirst) || normGuestFirst.includes(normFName))) {
+                                    if (normLName.includes(normalizeString(guest.last_name)) || normalizeString(guest.last_name).includes(normLName)) {
+                                        matchingOrEmpty++;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        let formsToCreate = data.length - matchingOrEmpty;
+                        if (formsToCreate > 0) {
+                            console.log(`🤖 Auto-creating ${formsToCreate} new guest forms ahead of time...`);
+                            for (let i = 0; i < formsToCreate; i++) {
+                                const btns = Array.from(document.querySelectorAll('button.btn-link'));
+                                const addBtn = btns.find(b => b.textContent.includes('Añadir nuevo huésped') || b.textContent.includes('Add new guest') || b.querySelector('.fa-plus'));
+                                if (addBtn) {
+                                    addBtn.click();
+                                    await new Promise(r => setTimeout(r, 1000)); // Important: wait for React to process the addition
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Fill forms sequentially
+                    for (let i = 0; i < data.length; i++) {
+                        await fillGuestForm(data[i], null);
+                        // Wait for Vue/React re-render + province re-application (longest delay is 1500ms)
                         await new Promise(r => setTimeout(r, 2000));
                         updateGuestButtonsState(container, data);
                     }
@@ -1616,7 +1782,7 @@ function run() {
             fillButtons.forEach((btn, index) => {
                 btn.onclick = async (evt) => {
                     evt.preventDefault();
-                    await fillGuestForm(data[index]);
+                    await fillGuestForm(data[index], index);
                     // Wait for Vue re-render + province re-application (longest delay is 1500ms)
                     await new Promise(r => setTimeout(r, 2000));
                     updateGuestButtonsState(container, data);

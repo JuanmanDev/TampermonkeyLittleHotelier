@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Easy Save Province/Country
 // @namespace    Hotelier Tools
-// @version      0.1.1
+// @version      0.1.2
 // @description  Better selection of Province/Country for Spanish guests and improve UI for mobile/tablet. Add a easy selector for the provice, when focus proivince display a list of provinces in spanish of Spain to select and mark country Spain and set a _ name and surname to be able to save it.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -148,7 +148,7 @@
     // 4. POPOVER DE PROVINCIAS EFICIENTE
     // =========================================================================
     const provinces = [
-        "A Coruña", "Álava", "Albacete", "Alicante", "Almería", "Asturias", "Ávila", "Badajoz", "Barcelona", "Burgos",
+        "A Coruña", "Álava", "Albacete", "Alicante", "Almería", "Asturias", "Ávila", "Badajoz", "Barcelona", "Bizkaia", "Burgos",
         "Cáceres", "Cádiz", "Cantabria", "Castellón", "Ceuta", "Ciudad Real", "Córdoba", "Cuenca", "Girona", "Granada",
         "Guadalajara", "Gipuzkoa", "Huelva", "Huesca", "Illes Balears", "Jaén", "La Rioja", "Las Palmas", "León", "Lleida",
         "Lugo", "Madrid", "Málaga", "Melilla", "Murcia", "Navarra", "Ourense", "Palencia", "Pontevedra", "Salamanca",
@@ -201,13 +201,13 @@
                     // Rellenar vacíos con "_" asegurando que Vue registre el cambio
                     // Soportamos name="first_name" (secundarios) e id="guest_first_name" (principal)
                     const nameSelectors = [
-                        'input[name="first_name"]', 
+                        'input[name="first_name"]',
                         'input[name="last_name"]',
                         'input[id="guest_first_name"]',
                         'input[id="guest_last_name"]'
                     ];
                     const nameInputs = guestForm.querySelectorAll(nameSelectors.join(','));
-                    
+
                     nameInputs.forEach(input => {
                         if (input.value.trim() === '') {
                             // ✔ Usamos el mismo hack superior de Vue para validar estos inputs
