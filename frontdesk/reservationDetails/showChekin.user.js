@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.4.1
+// @version      1.4.2
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception. Loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -1229,9 +1229,12 @@ function run() {
                 'vizcaya': 'Bizkaia',
                 'bizkaia': 'Bizkaia',
                 'guipuzcoa': 'Gipuzkoa',
-                'guipúzcoa': 'Gipuzkoa',
+                'gipuzcoa': 'Gipuzkoa',
                 'araba': 'Álava',
+                'alava': 'Álava',
+                'coruna': 'A Coruña',
                 'la coruna': 'A Coruña',
+                'corunna': 'A Coruña',
                 'orense': 'Ourense',
                 'gerona': 'Girona',
                 'lerida': 'Lleida',
@@ -1248,12 +1251,22 @@ function run() {
                 'mallorca': 'Illes Balears',
                 'menorca': 'Illes Balears',
                 'formentera': 'Illes Balears',
-                'pais vasco': 'Álava',
+                'pais vasco': 'Bizkaia',
+                'basque country': 'Bizkaia',
                 'euskadi': 'Gipuzkoa',
                 'castellon de la plana': 'Castellón',
                 'castello': 'Castellón',
                 'alicant': 'Alicante',
-                'alacant': 'Alicante'
+                'alacant': 'Alicante',
+                'seville': 'Sevilla',
+                'saragossa': 'Zaragoza',
+                'navarre': 'Navarra',
+                'nafarroa': 'Navarra',
+                'logrono': 'La Rioja',
+                'logroño': 'La Rioja',
+                'oviedo': 'Asturias',
+                'principado de asturias': 'Asturias',
+                'santander': 'Cantabria'
             };
 
             const mapped = alternativeNames[normCleaned];

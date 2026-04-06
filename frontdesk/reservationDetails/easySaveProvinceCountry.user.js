@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Easy Save Province/Country
 // @namespace    Hotelier Tools
-// @version      0.1.2
+// @version      0.1.3
 // @description  Better selection of Province/Country for Spanish guests and improve UI for mobile/tablet. Add a easy selector for the provice, when focus proivince display a list of provinces in spanish of Spain to select and mark country Spain and set a _ name and surname to be able to save it.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -288,10 +288,70 @@
         }
     }
 
+    const normalizeString = (str) => {
+        return (str || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    };
+
+    const alternativeNames = {
+        'vizcaya': 'Bizkaia',
+        'bizkaia': 'Bizkaia',
+        'guipuzcoa': 'Gipuzkoa',
+        'gipuzcoa': 'Gipuzkoa',
+        'araba': 'Álava',
+        'alava': 'Álava',
+        'coruna': 'A Coruña',
+        'la coruna': 'A Coruña',
+        'corunna': 'A Coruña',
+        'orense': 'Ourense',
+        'gerona': 'Girona',
+        'lerida': 'Lleida',
+        'baleares': 'Illes Balears',
+        'islas baleares': 'Illes Balears',
+        'tenerife': 'Santa Cruz de Tenerife',
+        'gran canaria': 'Las Palmas',
+        'lanzarote': 'Las Palmas',
+        'fuerteventura': 'Las Palmas',
+        'la palma': 'Santa Cruz de Tenerife',
+        'la gomera': 'Santa Cruz de Tenerife',
+        'el hierro': 'Santa Cruz de Tenerife',
+        'ibiza': 'Illes Balears',
+        'mallorca': 'Illes Balears',
+        'menorca': 'Illes Balears',
+        'formentera': 'Illes Balears',
+        'pais vasco': 'Bizkaia',
+        'basque country': 'Bizkaia',
+        'euskadi': 'Gipuzkoa',
+        'castellon de la plana': 'Castellón',
+        'castello': 'Castellón',
+        'alicant': 'Alicante',
+        'alacant': 'Alicante',
+        'seville': 'Sevilla',
+        'saragossa': 'Zaragoza',
+        'navarre': 'Navarra',
+        'nafarroa': 'Navarra',
+        'logrono': 'La Rioja',
+        'oviedo': 'Asturias',
+        'principado de asturias': 'Asturias',
+        'santander': 'Cantabria'
+    };
+
     function renderList(filterText = '') {
         if (!popover) return;
         popover.innerHTML = '';
-        const filtered = provinces.filter(p => !filterText || p.toLowerCase().includes(filterText.toLowerCase()));
+
+        const normFilter = normalizeString(filterText);
+        const filtered = provinces.filter(p => {
+            if (!normFilter) return true;
+            if (normalizeString(p).includes(normFilter)) return true;
+
+            // Check alternative names
+            for (const [altName, officialName] of Object.entries(alternativeNames)) {
+                if (officialName === p && altName.includes(normFilter)) {
+                    return true;
+                }
+            }
+            return false;
+        });
 
         if (filtered.length === 0) {
             hidePopover();
