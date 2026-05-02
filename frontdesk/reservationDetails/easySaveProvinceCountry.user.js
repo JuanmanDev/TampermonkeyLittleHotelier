@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Easy Save Province/Country
 // @namespace    Hotelier Tools
-// @version      0.1.3
+// @version      0.2.0
 // @description  Better selection of Province/Country for Spanish guests and improve UI for mobile/tablet. Add a easy selector for the provice, when focus proivince display a list of provinces in spanish of Spain to select and mark country Spain and set a _ name and surname to be able to save it.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -40,6 +40,51 @@
         // Disparamos ambos eventos por si el binding usa v-model.lazy (change) o estándar (input)
         element.dispatchEvent(new Event('input', { bubbles: true }));
         element.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    /**
+     * Comprueba si el selector de país para un elemento específico permite mostrar
+     * las funcionalidades específicas de España (vacío o "Spain").
+     */
+    function isCountryAllowedForTarget(target) {
+        if (!target) return true;
+        const container = target.closest('.guest-form') || target.closest('.contacts-totals-panel') || target.closest('.primary-contact-panel') || document;
+        const countrySelect = container.querySelector('select[name="country"], select[id="guest_country"]');
+
+        if (countrySelect) {
+            const val = countrySelect.value;
+            if (val !== '' && val !== 'Spain') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Rellena automáticamente el nombre y apellido con los valores de la reserva principal
+     * si están vacíos o contienen el marcador de posición "_".
+     */
+    function autoFillGuestNames(container) {
+        const guestForm = container.closest('.guest-form') || container.closest('.contacts-totals-panel') || container.closest('.primary-contact-panel') || document.body;
+        const mainFirstName = document.querySelector('#guest_first_name')?.value || '_';
+        const mainLastName = document.querySelector('#guest_last_name')?.value || '_';
+
+        const nameSelectors = [
+            'input[name="first_name"]',
+            'input[name="last_name"]',
+            'input[id="guest_first_name"]',
+            'input[id="guest_last_name"]'
+        ];
+        const nameInputs = guestForm.querySelectorAll(nameSelectors.join(','));
+
+        nameInputs.forEach(input => {
+            const currentVal = input.value.trim();
+            if (currentVal === '' || currentVal === '_') {
+                const isFirst = input.name === 'first_name' || input.id === 'guest_first_name';
+                const fallback = isFirst ? mainFirstName : mainLastName;
+                triggerVueUpdate(input, fallback);
+            }
+        });
     }
 
     // =========================================================================
@@ -92,6 +137,85 @@
     .reservation-panel #reservation-dialog form > .tab-content {
         min-height: 75vh;
     }
+    .reservation-guests-panel {
+        min-height: 75vh;
+    }
+    .alert.alert-placeholder {
+        margin: 0;
+    }
+
+    /* Estilos personalizados para el panel de huéspedes */
+    .reservation-guests-panel > .guest-room-type:first-of-type .guest-row { 
+        width: 100% !important; 
+        max-width: 100%; 
+    }
+    .reservation-guests-panel > .guest-room-type:first-of-type .row { 
+        display: flex !important; 
+        flex-wrap: nowrap; 
+        justify-content: space-between; 
+        align-items: center; 
+        width: 100%; 
+    }
+    .reservation-guests-panel > .guest-room-type:first-of-type .row > [class="col-sm-"] { 
+        float: none !important; 
+        width: auto !important; 
+        flex: 1 1 auto; 
+        min-width: 0; 
+    }
+    .reservation-guests-panel > .guest-room-type:first-of-type .row > .pull-right { 
+        flex: 0 0 auto; 
+        margin-left: auto; 
+        display: flex; 
+        justify-content: flex-end; 
+    }
+
+    @media (min-width: 1100px) {
+        .guest-row > .row > .col-sm-6,
+        .guest-row > .row > .col-sm-4 {
+            width: auto;
+        }
+        .guest-row { height: 100%; }
+        .text-primary.room-type-name,
+        .guest-row .count-label { font-size: 3rem; }
+    }
+    .reservation-guests-panel > .guest-room-type { margin-bottom: 0px; }
+    .guest-room-type > .guest-form { margin: 0; }
+
+    .popover-filter-container {
+        padding: 10px;
+        border-bottom: 1px solid #eee;
+        position: sticky;
+        top: 0;
+        background: white;
+        z-index: 2;
+    }
+    .popover-filter-input {
+        width: 100%;
+        padding: 10px 14px;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        font-size: 16px;
+        outline: none;
+        box-sizing: border-box;
+    }
+    .popover-filter-input:focus {
+        border-color: #0969da;
+        box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+    }
+    .province-item {
+        background-color: #f0f7ff;
+        transition: background-color 0.1s ease;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        border: 1px solid #e1e4e8;
+    }
+    .province-item:hover {
+        background-color: #cfe5ff;
+        border-color: #0969da;
+    }
   `;
     document.head.appendChild(style);
 
@@ -117,6 +241,11 @@
                     // Buscar el input de provincia 
                     // (buscamos a partir del padre común o a nivel global si está separado)
                     let container = btn.closest('.guest-form') || document;
+
+                    if (!isCountryAllowedForTarget(container)) {
+                        return; // No auto-enfocar si el país no es España o vacío
+                    }
+
                     const allStateInputs = container.querySelectorAll('input[name="state"].form-control');
 
                     if (allStateInputs.length > 0) {
@@ -145,7 +274,7 @@
 
 
     // =========================================================================
-    // 4. POPOVER DE PROVINCIAS EFICIENTE
+    // 4. DATOS Y POPOVER MULTIPROPÓSITO
     // =========================================================================
     const provinces = [
         "A Coruña", "Álava", "Albacete", "Alicante", "Almería", "Asturias", "Ávila", "Badajoz", "Barcelona", "Bizkaia", "Burgos",
@@ -156,8 +285,63 @@
         "Zamora", "Zaragoza"
     ].sort((a, b) => a.localeCompare(b, 'es'));
 
+    const countries = ["Australia", "Canada", "New Zealand", "South Africa", "Spain", "United Kingdom", "United States", "Afghanistan", "Aland Islands", "Albania", "Algeria", "American Samoa", "Andorra", "Angola", "Anguilla", "Antarctica", "Antigua And Barbuda", "Argentina", "Armenia", "Aruba", "Austria", "Azerbaijan", "Bahamas", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bermuda", "Bhutan", "Bolivia", "Bosnia and Herzegovina", "Botswana", "Bouvet Island", "Brazil", "British Indian Ocean Territory", "Brunei Darussalam", "Bulgaria", "Burkina Faso", "Burundi", "Cambodia", "Cameroon", "Cape Verde", "Cayman Islands", "Central African Republic", "Chad", "Chile", "China", "Christmas Island", "Cocos (Keeling) Islands", "Colombia", "Comoros", "Congo", "Congo, the Democratic Republic of the", "Cook Islands", "Costa Rica", "Cote d'Ivoire", "Croatia", "Cuba", "Curacao", "Cyprus", "Czech Republic", "Denmark", "Djibouti", "Dominica", "Dominican Republic", "Ecuador", "Egypt", "El Salvador", "Equatorial Guinea", "Eritrea", "Estonia", "Ethiopia", "Falkland Islands (Malvinas)", "Faroe Islands", "Fiji", "Finland", "France", "French Guiana", "French Polynesia", "French Southern Territories", "Gabon", "Gambia", "Georgia", "Germany", "Ghana", "Gibraltar", "Greece", "Greenland", "Grenada", "Guadeloupe", "Guam", "Guatemala", "Guernsey", "Guinea", "Guinea-Bissau", "Guyana", "Haiti", "Heard and McDonald Islands", "Holy See (Vatican City State)", "Honduras", "Hong Kong", "Hungary", "Iceland", "India", "Indonesia", "Iran, Islamic Republic of", "Iraq", "Ireland", "Isle of Man", "Israel", "Italy", "Jamaica", "Japan", "Jersey", "Jordan", "Kazakhstan", "Kenya", "Kiribati", "Korea, Democratic People's Republic of", "Korea, Republic of", "Kuwait", "Kyrgyzstan", "Lao People's Democratic Republic", "Latvia", "Lebanon", "Lesotho", "Liberia", "Libyan Arab Jamahiriya", "Liechtenstein", "Lithuania", "Luxembourg", "Macao", "Macedonia, The Former Yugoslav Republic Of", "Madagascar", "Malawi", "Malaysia", "Maldives", "Mali", "Malta", "Marshall Islands", "Martinique", "Mauritania", "Mauritius", "Mayotte", "Mexico", "Micronesia, Federated States of", "Moldova, Republic of", "Monaco", "Mongolia", "Montenegro", "Montserrat", "Morocco", "Mozambique", "Myanmar", "Namibia", "Nauru", "Nepal", "Netherlands", "New Caledonia", "Nicaragua", "Niger", "Nigeria", "Niue", "Norfolk Island", "Northern Mariana Islands", "Norway", "Oman", "Pakistan", "Palau", "Palestinian Territory, Occupied", "Panama", "Papua New Guinea", "Paraguay", "Peru", "Philippines", "Pitcairn", "Poland", "Portugal", "Puerto Rico", "Qatar", "Reunion", "Romania", "Russian Federation", "Rwanda", "Saint Barthelemy", "Saint Helena", "Saint Kitts and Nevis", "Saint Lucia", "Saint Pierre and Miquelon", "Saint Vincent and the Grenadines", "Samoa", "San Marino", "Sao Tome and Principe", "Saudi Arabia", "Senegal", "Serbia", "Seychelles", "Sierra Leone", "Singapore", "Sint Maarten", "Slovakia", "Slovenia", "Solomon Islands", "Somalia", "South Georgia and the South Sandwich Islands", "Sri Lanka", "Sudan", "Suriname", "Svalbard and Jan Mayen", "Swaziland", "Sweden", "Switzerland", "Syrian Arab Republic", "Taiwan", "Tajikistan", "Tanzania, United Republic of", "Thailand", "Timor-Leste", "Togo", "Tokelau", "Tonga", "Trinidad and Tobago", "Tunisia", "Turkey", "Turkmenistan", "Turks and Caicos Islands", "Tuvalu", "Uganda", "Ukraine", "United Arab Emirates", "United States Minor Outlying Islands", "Uruguay", "Uzbekistan", "Vanuatu", "Venezuela", "Viet Nam", "Virgin Islands, British", "Virgin Islands, U.S.", "Wallis and Futuna", "Western Sahara", "Yemen", "Zambia", "Zimbabwe"];
+
+    const countryTranslations = {
+        'Afghanistan': 'Afganistán', 'Albania': 'Albania', 'Algeria': 'Argelia', 'Andorra': 'Andorra', 'Angola': 'Angola',
+        'Antigua And Barbuda': 'Antigua y Barbuda', 'Argentina': 'Argentina', 'Armenia': 'Armenia', 'Australia': 'Australia',
+        'Austria': 'Austria', 'Azerbaijan': 'Azerbaiyán', 'Bahamas': 'Bahamas', 'Bahrain': 'Baréin', 'Bangladesh': 'Bangladés',
+        'Barbados': 'Barbados', 'Belarus': 'Bielorrusia', 'Belgium': 'Bélgica', 'Belize': 'Belice', 'Benin': 'Benín',
+        'Bhutan': 'Bután', 'Bolivia': 'Bolivia', 'Bosnia and Herzegovina': 'Bosnia y Herzegovina', 'Botswana': 'Botsuana',
+        'Brazil': 'Brasil', 'Brunei Darussalam': 'Brunéi', 'Bulgaria': 'Bulgaria', 'Burkina Faso': 'Burkina Faso',
+        'Burundi': 'Burundi', 'Cambodia': 'Camboya', 'Cameroon': 'Camerún', 'Canada': 'Canadá', 'Cape Verde': 'Cabo Verde',
+        'Central African Republic': 'República Centroafricana', 'Chad': 'Chad', 'Chile': 'Chile', 'China': 'China',
+        'Colombia': 'Colombia', 'Comoros': 'Comoras', 'Congo': 'Congo', 'Congo, the Democratic Republic of the': 'República Democrática del Congo',
+        'Costa Rica': 'Costa Rica', 'Cote d\'Ivoire': 'Costa de Marfil', 'Croatia': 'Croacia', 'Cuba': 'Cuba',
+        'Cyprus': 'Chipre', 'Czech Republic': 'República Checa', 'Denmark': 'Dinamarca', 'Djibouti': 'Yibuti',
+        'Dominica': 'Dominica', 'Dominican Republic': 'República Dominicana', 'Ecuador': 'Ecuador', 'Egypt': 'Egipto',
+        'El Salvador': 'El Salvador', 'Equatorial Guinea': 'Guinea Ecuatorial', 'Eritrea': 'Eritrea', 'Estonia': 'Estonia',
+        'Ethiopia': 'Etiopía', 'Fiji': 'Fiyi', 'Finland': 'Finlandia', 'France': 'Francia', 'Gabon': 'Gabón',
+        'Gambia': 'Gambia', 'Georgia': 'Georgia', 'Germany': 'Alemania', 'Ghana': 'Ghana', 'Greece': 'Grecia',
+        'Grenada': 'Granada', 'Guatemala': 'Guatemala', 'Guinea': 'Guinea', 'Guinea-Bissau': 'Guinea-Bisáu',
+        'Guyana': 'Guyana', 'Haiti': 'Haití', 'Holy See (Vatican City State)': 'Vaticano', 'Honduras': 'Honduras',
+        'Hungary': 'Hungría', 'Iceland': 'Islandia', 'India': 'India', 'Indonesia': 'Indonesia', 'Iran, Islamic Republic of': 'Irán',
+        'Iraq': 'Irak', 'Ireland': 'Irlanda', 'Israel': 'Israel', 'Italy': 'Italia', 'Jamaica': 'Jamaica',
+        'Japan': 'Japón', 'Jordan': 'Jordania', 'Kazakhstan': 'Kazajistán', 'Kenya': 'Kenia', 'Kiribati': 'Kiribati',
+        'Korea, Democratic People\'s Republic of': 'Corea del Norte', 'Korea, Republic of': 'Corea del Sur',
+        'Kuwait': 'Kuwait', 'Kyrgyzstan': 'Kirguistán', 'Lao People\'s Democratic Republic': 'Laos', 'Latvia': 'Letonia',
+        'Lebanon': 'Líbano', 'Lesotho': 'Lesoto', 'Liberia': 'Liberia', 'Libyan Arab Jamahiriya': 'Libia',
+        'Liechtenstein': 'Liechtenstein', 'Lithuania': 'Lituania', 'Luxembourg': 'Luxemburgo',
+        'Macedonia, The Former Yugoslav Republic Of': 'Macedonia del Norte', 'Madagascar': 'Madagascar', 'Malawi': 'Malaui',
+        'Malaysia': 'Malasia', 'Maldives': 'Maldivas', 'Mali': 'Mali', 'Malta': 'Malta', 'Marshall Islands': 'Islas Marshall',
+        'Mauritania': 'Mauritania', 'Mauritius': 'Mauricio', 'Mexico': 'México', 'Micronesia, Federated States of': 'Micronesia',
+        'Moldova, Republic of': 'Moldavia', 'Monaco': 'Mónaco', 'Mongolia': 'Mongolia', 'Montenegro': 'Montenegro',
+        'Morocco': 'Marruecos', 'Mozambique': 'Mozambique', 'Myanmar': 'Myanmar', 'Namibia': 'Namibia', 'Nauru': 'Nauru',
+        'Nepal': 'Nepal', 'Netherlands': 'Países Bajos', 'New Zealand': 'Nueva Zelanda', 'Nicaragua': 'Nicaragua',
+        'Niger': 'Níger', 'Nigeria': 'Nigeria', 'Norway': 'Noruega', 'Oman': 'Omán', 'Pakistan': 'Pakistán',
+        'Palau': 'Palaos', 'Panama': 'Panamá', 'Papua New Guinea': 'Papúa Nueva Guinea', 'Paraguay': 'Paraguay',
+        'Peru': 'Perú', 'Philippines': 'Filipinas', 'Poland': 'Polonia', 'Portugal': 'Portugal', 'Qatar': 'Catar',
+        'Romania': 'Rumanía', 'Russian Federation': 'Rusia', 'Rwanda': 'Ruanda', 'Saint Kitts and Nevis': 'San Cristóbal y Nieves',
+        'Saint Lucia': 'Santa Lucía', 'Saint Vincent and the Grenadines': 'San Vicente y las Granadinas', 'Samoa': 'Samoa',
+        'San Marino': 'San Marino', 'Sao Tome and Principe': 'Santo Tomé y Príncipe', 'Saudi Arabia': 'Arabia Saudita',
+        'Senegal': 'Senegal', 'Serbia': 'Serbia', 'Seychelles': 'Seychelles', 'Sierra Leone': 'Sierra Leona',
+        'Singapore': 'Singapur', 'Slovakia': 'Eslovaquia', 'Slovenia': 'Eslovenia', 'Solomon Islands': 'Islas Salomón',
+        'Somalia': 'Somalia', 'South Africa': 'Sudáfrica', 'Spain': 'España', 'Sri Lanka': 'Sri Lanka',
+        'Sudan': 'Sudán', 'Suriname': 'Surinam', 'Sweden': 'Suecia', 'Switzerland': 'Suiza',
+        'Syrian Arab Republic': 'Siria', 'Tajikistan': 'Tayikistán', 'Tanzania, United Republic of': 'Tanzania',
+        'Thailand': 'Tailandia', 'Timor-Leste': 'Timor Oriental', 'Togo': 'Togo', 'Tonga': 'Tonga',
+        'Trinidad and Tobago': 'Trinidad y Tobago', 'Tunisia': 'Túnez', 'Turkey': 'Turquía', 'Turkmenistan': 'Turkmenistán',
+        'Tuvalu': 'Tuvalu', 'Uganda': 'Uganda', 'Ukraine': 'Ucrania', 'United Arab Emirates': 'Emiratos Árabes Unidos',
+        'United Kingdom': 'Reino Unido', 'United States': 'Estados Unidos', 'Uruguay': 'Uruguay', 'Uzbekistan': 'Uzbekistán',
+        'Vanuatu': 'Vanuatu', 'Venezuela': 'Venezuela', 'Viet Nam': 'Vietnam', 'Yemen': 'Yemen', 'Zambia': 'Zambia',
+        'Zimbabwe': 'Zimbabue', 'Puerto Rico': 'Puerto Rico'
+    };
+
     let popover = null;
-    let currentTargetInput = null;
+    let popoverList = null;
+    let popoverFilterInput = null;
+    let popoverType = 'province'; // 'province' o 'country'
+    let currentTargetElement = null;
 
     function createPopover() {
         if (popover) return;
@@ -167,68 +351,83 @@
         popover.style.zIndex = '999999';
         popover.style.background = '#ffffff';
         popover.style.border = '1px solid #ddd';
-        popover.style.borderRadius = '6px';
-        popover.style.boxShadow = '0 8px 24px rgba(0,0,0,0.18)';
-        popover.style.maxHeight = '75vh';
-        popover.style.overflowY = 'auto';
+        popover.style.borderRadius = '8px';
+        popover.style.boxShadow = '0 8px 32px rgba(0,0,0,0.2)';
+        popover.style.maxHeight = '80vh';
+        popover.style.overflow = 'hidden';
         popover.style.display = 'none';
         popover.style.boxSizing = 'border-box';
+        popover.style.flexDirection = 'column';
 
-        popover.style.gridTemplateColumns = 'repeat(auto-fill, minmax(170px, 1fr))';
-        popover.style.gap = '6px';
-        popover.style.padding = '12px';
+        // Filter container
+        const filterContainer = document.createElement('div');
+        filterContainer.className = 'popover-filter-container';
+
+        popoverFilterInput = document.createElement('input');
+        popoverFilterInput.type = 'text';
+        popoverFilterInput.className = 'popover-filter-input';
+        popoverFilterInput.placeholder = 'Buscar...';
+        popoverFilterInput.autocomplete = 'off';
+
+        filterContainer.appendChild(popoverFilterInput);
+        popover.appendChild(filterContainer);
+
+        // List container
+        popoverList = document.createElement('div');
+        popoverList.style.flex = '1';
+        popoverList.style.overflowY = 'auto';
+        popoverList.style.display = 'flex';
+        popoverList.style.flexWrap = 'wrap';
+        popoverList.style.gap = '8px';
+        popoverList.style.padding = '12px';
+        popover.appendChild(popoverList);
 
         document.body.appendChild(popover);
 
-        popover.addEventListener('mousedown', function (e) { e.preventDefault(); });
+        popover.addEventListener('mousedown', function (e) {
+            if (e.target !== popoverFilterInput) {
+                e.preventDefault();
+            }
+        });
+
+        popoverFilterInput.addEventListener('input', function () {
+            renderList(popoverFilterInput.value);
+        });
 
         popover.addEventListener('click', function (e) {
-            if (e.target.classList.contains('province-item')) {
-                const selectedValue = e.target.textContent;
-                if (currentTargetInput) {
+            const item = e.target.closest('.province-item');
+            if (item) {
+                const selectedValue = item.dataset.value;
+                if (currentTargetElement) {
+                    const savedElement = currentTargetElement;
 
-                    // Guardamos referencia antes de que hidePopover() la borre
-                    const savedInput = currentTargetInput;
+                    if (popoverType === 'province') {
+                        triggerVueUpdate(savedElement, selectedValue);
 
-                    // ✔ Actualización Forzada de Vue (para que lo marque como DIRTY)
-                    triggerVueUpdate(savedInput, selectedValue);
+                        // Auto-relleno de nombres
+                        autoFillGuestNames(savedElement);
 
-                    // Buscar el contenedor del formulario (huésped secundario o contacto principal)
-                    // Para el form principal: #guest_state está fuera de .primary-contact-panel
-                    // pero dentro de .contacts-totals-panel junto con #guest_country
-                    const guestForm = savedInput.closest('.guest-form') || savedInput.closest('.contacts-totals-panel') || savedInput.closest('.primary-contact-panel') || document.body;
-
-                    // Rellenar vacíos con "_" asegurando que Vue registre el cambio
-                    // Soportamos name="first_name" (secundarios) e id="guest_first_name" (principal)
-                    const nameSelectors = [
-                        'input[name="first_name"]',
-                        'input[name="last_name"]',
-                        'input[id="guest_first_name"]',
-                        'input[id="guest_last_name"]'
-                    ];
-                    const nameInputs = guestForm.querySelectorAll(nameSelectors.join(','));
-
-                    nameInputs.forEach(input => {
-                        if (input.value.trim() === '') {
-                            // ✔ Usamos el mismo hack superior de Vue para validar estos inputs
-                            triggerVueUpdate(input, '_');
+                        const guestForm = savedElement.closest('.guest-form') || savedElement.closest('.contacts-totals-panel') || savedElement.closest('.primary-contact-panel') || document.body;
+                        const countrySelect = guestForm.querySelector('select[name="country"], select[id="guest_country"]');
+                        if (countrySelect) {
+                            triggerVueUpdate(countrySelect, 'Spain');
                         }
-                    });
 
-                    // Cambiar a España asegurando validación
-                    // Buscamos el select de país dentro del mismo contenedor
-                    const countrySelect = guestForm.querySelector('select[name="country"], select[id="guest_country"]');
-                    if (countrySelect) {
-                        triggerVueUpdate(countrySelect, 'Spain');
+                        setTimeout(() => {
+                            triggerVueUpdate(savedElement, selectedValue);
+                            savedElement.blur();
+                        }, 50);
+                    } else {
+                        // Selección de país
+                        triggerVueUpdate(savedElement, selectedValue);
+
+                        // Si se selecciona un país (y no está vacío), auto-rellenamos nombres
+                        if (selectedValue) {
+                            autoFillGuestNames(savedElement);
+                        }
+
+                        savedElement.blur();
                     }
-
-                    // ✔ Re-aplicar provincia tras un breve delay para sobrevivir al
-                    // re-render de Vue provocado al cambiar país/nombres
-                    setTimeout(() => {
-                        triggerVueUpdate(savedInput, selectedValue);
-                        savedInput.blur();
-                    }, 50);
-
                 }
                 hidePopover();
             }
@@ -236,10 +435,10 @@
     }
 
     function updatePosition() {
-        if (popover && popover.style.display !== 'none' && currentTargetInput) {
-            const inputRect = currentTargetInput.getBoundingClientRect();
+        if (popover && popover.style.display !== 'none' && currentTargetElement) {
+            const inputRect = currentTargetElement.getBoundingClientRect();
 
-            let container = currentTargetInput.closest('.row');
+            let container = currentTargetElement.closest('.row');
             while (container && container.parentElement && container.parentElement.closest('.row')) {
                 container = container.parentElement.closest('.row');
             }
@@ -267,24 +466,29 @@
         }
     }
 
-    function showPopover(inputElement) {
+    function showPopover(element, type = 'province') {
         createPopover();
-        currentTargetInput = inputElement;
+        currentTargetElement = element;
+        popoverType = type;
 
-        currentTargetInput.setAttribute('autocomplete', 'new-password');
-        currentTargetInput.setAttribute('data-lpignore', 'true');
-        currentTargetInput.setAttribute('data-form-type', 'other');
+        if (type === 'province') {
+            popoverFilterInput.parentElement.style.display = 'none';
+            renderList(element.value);
+        } else {
+            popoverFilterInput.parentElement.style.display = 'block';
+            popoverFilterInput.value = '';
+            renderList('');
+            setTimeout(() => popoverFilterInput.focus(), 50);
+        }
 
-        renderList(inputElement.value);
-
-        popover.style.display = 'grid';
+        popover.style.display = 'flex';
         updatePosition();
     }
 
     function hidePopover() {
         if (popover) {
             popover.style.display = 'none';
-            currentTargetInput = null;
+            currentTargetElement = null;
         }
     }
 
@@ -293,94 +497,86 @@
     };
 
     const alternativeNames = {
-        'vizcaya': 'Bizkaia',
-        'bizkaia': 'Bizkaia',
-        'guipuzcoa': 'Gipuzkoa',
-        'gipuzcoa': 'Gipuzkoa',
-        'araba': 'Álava',
-        'alava': 'Álava',
-        'coruna': 'A Coruña',
-        'la coruna': 'A Coruña',
-        'corunna': 'A Coruña',
-        'orense': 'Ourense',
-        'gerona': 'Girona',
-        'lerida': 'Lleida',
-        'baleares': 'Illes Balears',
-        'islas baleares': 'Illes Balears',
-        'tenerife': 'Santa Cruz de Tenerife',
-        'gran canaria': 'Las Palmas',
-        'lanzarote': 'Las Palmas',
-        'fuerteventura': 'Las Palmas',
-        'la palma': 'Santa Cruz de Tenerife',
-        'la gomera': 'Santa Cruz de Tenerife',
-        'el hierro': 'Santa Cruz de Tenerife',
-        'ibiza': 'Illes Balears',
-        'mallorca': 'Illes Balears',
-        'menorca': 'Illes Balears',
-        'formentera': 'Illes Balears',
-        'pais vasco': 'Bizkaia',
-        'basque country': 'Bizkaia',
-        'euskadi': 'Gipuzkoa',
-        'castellon de la plana': 'Castellón',
-        'castello': 'Castellón',
-        'alicant': 'Alicante',
-        'alacant': 'Alicante',
-        'seville': 'Sevilla',
-        'saragossa': 'Zaragoza',
-        'navarre': 'Navarra',
-        'nafarroa': 'Navarra',
-        'logrono': 'La Rioja',
-        'oviedo': 'Asturias',
-        'principado de asturias': 'Asturias',
-        'santander': 'Cantabria'
+        'vizcaya': 'Bizkaia', 'bizkaia': 'Bizkaia', 'guipuzcoa': 'Gipuzkoa', 'gipuzcoa': 'Gipuzkoa',
+        'araba': 'Álava', 'alava': 'Álava', 'coruna': 'A Coruña', 'la coruna': 'A Coruña',
+        'corunna': 'A Coruña', 'orense': 'Ourense', 'gerona': 'Girona', 'lerida': 'Lleida',
+        'baleares': 'Illes Balears', 'islas baleares': 'Illes Balears', 'tenerife': 'Santa Cruz de Tenerife',
+        'gran canaria': 'Las Palmas', 'lanzarote': 'Las Palmas', 'fuerteventura': 'Las Palmas',
+        'la palma': 'Santa Cruz de Tenerife', 'la gomera': 'Santa Cruz de Tenerife', 'el hierro': 'Santa Cruz de Tenerife',
+        'ibiza': 'Illes Balears', 'mallorca': 'Illes Balears', 'menorca': 'Illes Balears', 'formentera': 'Illes Balears',
+        'pais vasco': 'Bizkaia', 'basque country': 'Bizkaia', 'euskadi': 'Gipuzkoa', 'castellon de la plana': 'Castellón',
+        'castello': 'Castellón', 'alicant': 'Alicante', 'alacant': 'Alicante', 'seville': 'Sevilla',
+        'saragossa': 'Zaragoza', 'navarre': 'Navarra', 'nafarroa': 'Navarra', 'logrono': 'La Rioja',
+        'oviedo': 'Asturias', 'principado de asturias': 'Asturias', 'santander': 'Cantabria'
     };
 
     function renderList(filterText = '') {
-        if (!popover) return;
-        popover.innerHTML = '';
+        if (!popoverList) return;
+        popoverList.innerHTML = '';
 
         const normFilter = normalizeString(filterText);
-        const filtered = provinces.filter(p => {
-            if (!normFilter) return true;
-            if (normalizeString(p).includes(normFilter)) return true;
+        const dataSet = popoverType === 'province' ? provinces : countries;
 
-            // Check alternative names
-            for (const [altName, officialName] of Object.entries(alternativeNames)) {
-                if (officialName === p && altName.includes(normFilter)) {
-                    return true;
+        const filtered = dataSet.filter(item => {
+            if (!normFilter) return true;
+            const label = popoverType === 'country' ? (countryTranslations[item] || item) : item;
+
+            const itemNorm = normalizeString(item);
+            const labelNorm = normalizeString(label);
+
+            // Búsqueda flexible: dividimos por espacios y comprobamos que todas las palabras coincidan
+            const searchWords = normFilter.split(/\s+/);
+            const matchesAll = searchWords.every(word =>
+                labelNorm.includes(word) || itemNorm.includes(word)
+            );
+
+            if (matchesAll) return true;
+
+            if (popoverType === 'province') {
+                for (const [altName, officialName] of Object.entries(alternativeNames)) {
+                    if (officialName === item && searchWords.every(word => normalizeString(altName).includes(word))) {
+                        return true;
+                    }
                 }
             }
             return false;
         });
 
-        if (filtered.length === 0) {
-            hidePopover();
-            return;
-        }
+        if (filtered.length === 0) return;
 
-        popover.style.display = 'grid';
+        popover.style.display = 'flex';
         filtered.forEach(p => {
             const item = document.createElement('div');
-            item.textContent = p;
+            const translation = popoverType === 'country' ? (countryTranslations[p] || p) : p;
+
+            if (popoverType === 'country' && translation !== p) {
+                item.innerHTML = `<div style="font-weight: 600; font-size: 15px;">${translation}</div><div style="font-size: 11px; opacity: 0.7;">${p}</div>`;
+            } else {
+                item.textContent = translation;
+                item.style.fontWeight = '600';
+            }
+
+            item.dataset.value = p;
             item.className = 'province-item';
-            item.style.padding = '8px 12px';
+            item.style.padding = '12px 10px';
             item.style.cursor = 'pointer';
-            item.style.borderRadius = '4px';
-            item.style.fontSize = '14.5px';
+            item.style.borderRadius = '6px';
             item.style.fontFamily = 'Lato, sans-serif';
-            item.style.transition = 'background-color 0.1s ease';
             item.style.wordBreak = 'break-word';
+            item.style.flex = '1 1 180px';
+            item.style.minHeight = '50px';
 
-            item.addEventListener('mouseenter', () => item.style.backgroundColor = '#e8f0fe');
-            item.addEventListener('mouseleave', () => item.style.backgroundColor = 'transparent');
-
-            popover.appendChild(item);
+            popoverList.appendChild(item);
         });
     }
 
     function isStateInput(target) {
-        return target && target.tagName === 'INPUT' && target.type === 'text' &&
+        const isState = target && target.tagName === 'INPUT' && target.type === 'text' &&
             (target.name === 'state' || target.id === 'guest_state' || target.placeholder === 'Provincia/Región');
+
+        if (!isState) return false;
+
+        return isCountryAllowedForTarget(target);
     }
 
     // click logic to make the whole container clickable
@@ -396,14 +592,41 @@
         }
     });
 
+    function isCountrySelect(target) {
+        return target && target.tagName === 'SELECT' &&
+            (target.name === 'country' || target.id === 'guest_country');
+    }
+
+    document.addEventListener('click', function (e) {
+        // Cerrar si se hace clic fuera del popover y del elemento que lo activó
+        if (popover && popover.style.display !== 'none') {
+            if (!popover.contains(e.target) && e.target !== currentTargetElement) {
+                hidePopover();
+                return; // Evitamos procesar más si acabamos de cerrar
+            }
+        }
+
+        if (!e.target.closest('.province-item') && !e.target.closest('.popover-filter-container')) {
+            const container = e.target.closest('.form-group') || e.target.closest('.col-sm-3');
+            if (container) {
+                const stateInput = container.querySelector('input[name="state"], input[id="guest_state"]');
+                if (stateInput && e.target !== stateInput) {
+                    stateInput.focus();
+                }
+            }
+        }
+    });
+
     document.addEventListener('focusin', function (e) {
-        if (isStateInput(e.target)) showPopover(e.target);
+        if (isStateInput(e.target)) showPopover(e.target, 'province');
+        else if (isCountrySelect(e.target)) showPopover(e.target, 'country');
     });
 
     document.addEventListener('focusout', function (e) {
-        if (isStateInput(e.target)) {
+        if (isStateInput(e.target) || isCountrySelect(e.target)) {
             setTimeout(() => {
-                if (document.activeElement !== e.target && (!popover || !popover.contains(document.activeElement))) {
+                if (document.activeElement !== e.target &&
+                    (!popover || !popover.contains(document.activeElement))) {
                     hidePopover();
                 }
             }, 150);
@@ -412,13 +635,10 @@
 
     document.addEventListener('input', function (e) {
         if (isStateInput(e.target)) {
-            if (popover && popover.style.display !== 'none' && currentTargetInput === e.target) {
+            if (popover && popover.style.display !== 'none' && currentTargetElement === e.target && popoverType === 'province') {
                 renderList(e.target.value);
-                if (popover.style.display !== 'grid' && e.target.value.length >= 0) {
-                    popover.style.display = 'grid';
-                }
             } else {
-                showPopover(e.target);
+                showPopover(e.target, 'province');
             }
         }
     });
