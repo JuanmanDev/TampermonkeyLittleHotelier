@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.4.2
+// @version      1.4.3
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception. Loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -74,6 +74,8 @@ function run() {
             emailBody: 'Hello,\n\nPlease complete your guest registration using the following link:\n\n{link}\n\nThank you!',
             whatsappMessage: 'Hello! Please complete your guest registration using this link: {link}',
             footer: '\n\nHostal Sol Zamora - https://hostalsolzamora.com/',
+            waitingPlease: 'Please wait, do not close the reservation until finished',
+            allSaved: 'All data saved, press the save button to confirm',
         },
         es: {
             status: 'Estado de Chekin.com:',
@@ -109,6 +111,8 @@ function run() {
             emailBody: 'Hola,\n\nPor favor complete su registro de huésped usando el siguiente enlace:\n\n{link}\n\n¡Gracias!',
             whatsappMessage: '¡Hola! Por favor complete su registro de huésped usando este enlace: {link}',
             footer: '\n\nHostal Sol Zamora - https://hostalsolzamora.com/',
+            waitingPlease: 'Espere por favor, no cierre la reserva hasta terminar',
+            allSaved: 'Todos los datos guardados, pulse el boton de guardar para confirmar',
         }
     };
 
@@ -769,12 +773,58 @@ function run() {
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
         .chekin-spinner { display: inline-block; animation: chekinSpin 1s linear infinite; }
         @keyframes chekinSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        
+        /* Unified Loading Bar Styles */
+        .chekin-loading-row {
+            height: 0;
+            overflow: hidden;
+            opacity: 0;
+            transition: height 0.5s ease, opacity 0.3s ease, margin 0.3s ease;
+            margin: 0;
+        }
+        .chekin-loading-row.active {
+            height: 45px;
+            opacity: 1;
+            margin: 10px 0;
+        }
+        .chekin-progress-container {
+            width: 100%;
+            height: 8px;
+            background: #eee;
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+            margin-bottom: 5px;
+        }
+        .chekin-progress-bar {
+            width: 40%;
+            height: 100%;
+            background: #f0ad4e;
+            position: absolute;
+            animation: chekinLoadingBar 1.5s infinite linear;
+        }
+        @keyframes chekinLoadingBar { 
+            0% { transform: translateX(-100%); } 
+            100% { transform: translateX(250%); } 
+        }
+        .chekin-loading-text {
+            font-size: 13px;
+            font-weight: bold;
+            color: #666;
+            text-align: center;
+            display: block;
+        }
         </style>
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                    <img src="https://f.hubspotusercontent10.net/hubfs/8776616/Logo%20nuevo%20azul-1.png" alt="Chekin" style="height: 24px;">
-                    <strong>${t.status}</strong>
-                    <span id="chekin-status">${t.checkingCache}</span>
-                    <a id="chekin-link" href="undefined" target="_blank" class="btn btn-sm btn-primary" style="display: none; margin-left: auto;">${t.viewInChekin}</a>
+                <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 5px; position: relative;">
+                    <img src="https://f.hubspotusercontent10.net/hubfs/8776616/Logo%20nuevo%20azul-1.png" alt="Chekin" style="height: 24px; position: absolute; left: 0;">
+                    <span id="chekin-status" style="font-weight: bold;">${t.checkingCache}</span>
+                    <a id="chekin-link" href="undefined" target="_blank" class="btn btn-sm btn-primary" style="display: none; position: absolute; right: 0;">${t.viewInChekin}</a>
+                </div>
+                <div id="chekin-loading-row" class="chekin-loading-row">
+                    <div class="chekin-progress-container">
+                        <div class="chekin-progress-bar"></div>
+                    </div>
+                    <span id="chekin-loading-message" class="chekin-loading-text"></span>
                 </div>
                 <div id="chekin-details" style="margin-top: 10px;"></div>
                 <div id="chekin-table" style="margin-top: 10px;"></div>
@@ -793,8 +843,8 @@ function run() {
             const urlMatch = window.location.pathname.match(/\/reservations\/([^/]+)\//);
             const targetRef = apiRef || (urlMatch ? urlMatch[1] : '');
 
-            // Create cache key based on date and room
-            const cacheKey = CONFIG.STORAGE_PREFIX + btoa(`${checkInDate}_${rooms.join('_')}`);
+            // Create cache key based on date, room, and ref to isolate per reservation
+            const cacheKey = CONFIG.STORAGE_PREFIX + targetRef + '_' + btoa(`${checkInDate}_${rooms.join('_')}`);
             const cachedData = JSON.parse(localStorage.getItem(cacheKey) || 'null');
             const now = Date.now();
 
@@ -817,35 +867,44 @@ function run() {
             }
         };
 
+        const showLoadingBar = (container, message) => {
+            const loadingRow = container.querySelector('#chekin-loading-row');
+            const messageSpan = container.querySelector('#chekin-loading-message');
+            if (loadingRow && messageSpan) {
+                messageSpan.innerText = message || '';
+                loadingRow.classList.add('active');
+            }
+        };
+
+        const hideLoadingBar = (container) => {
+            const loadingRow = container.querySelector('#chekin-loading-row');
+            if (loadingRow) {
+                loadingRow.classList.remove('active');
+            }
+        };
+
         const startBackgroundSearch = (checkInDate, rooms, container, cacheKey) => {
             const statusSpan = container.querySelector('#chekin-status');
-            statusSpan.innerHTML = `
-        <style>
-        @keyframes chekinLoadingBar { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
-        </style>
-        <div style="width: 100px; height: 6px; border-radius: 3px; background: #e0e0e0; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; position: relative;">
-            <div style="width: 40%; height: 100%; background: #f0ad4e; position: absolute; animation: chekinLoadingBar 1s infinite linear;"></div>
-        </div>
-                ${t.searching}
-    `;
+            statusSpan.innerHTML = t.searching;
             statusSpan.style.color = 'orange';
+            showLoadingBar(container, ''); // Show animation without duplicating the text
 
             const checkinLink = container.querySelector('#chekin-link');
             checkinLink.style.display = 'none';
-
-            // Clean previous communication channels
-            GM_deleteValue('chekin_response');
-            GM_setValue('chekin_request', {
-                checkInDate,
-                rooms,
-                timestamp: Date.now()
-            });
 
             // Get booking reference - prefer API-captured, fallback to URL path
             const apiRef = document.documentElement.getAttribute('data-lh-booking-ref') || '';
             const urlMatch = window.location.pathname.match(/\/reservations\/([^/]+)\//);
             const targetRef = apiRef || (urlMatch ? urlMatch[1] : '');
             console.log('🏨 Launching Chekin Search, Target Ref:', targetRef, '(API:', apiRef, ', URL:', urlMatch?.[1], ')');
+
+            // Clean previous communication channels
+            GM_deleteValue('chekin_response_' + targetRef);
+            GM_setValue('chekin_request_' + targetRef, {
+                checkInDate,
+                rooms,
+                timestamp: Date.now()
+            });
 
             // Open Background Tab with search params
             const searchUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autosearch=true&date=${encodeURIComponent(checkInDate)}&rooms=${encodeURIComponent(rooms.join(','))}&ref=${encodeURIComponent(targetRef)}`;
@@ -864,7 +923,7 @@ function run() {
                         signupFormLink: newValue.signupFormLink
                     }));
                     renderResults(container, newValue.data, newValue.link, newValue.signupFormLink);
-
+                    hideLoadingBar(container);
 
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = newValue.link;
@@ -876,6 +935,7 @@ function run() {
                 else if (newValue.status === 'no_guests') {
                     statusSpan.innerHTML = `${t.noGuestsYet}`;
                     statusSpan.style.color = 'orange';
+                    hideLoadingBar(container);
 
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = newValue.link;
@@ -888,6 +948,7 @@ function run() {
                 else if (newValue.status === 'not_found') {
                     statusSpan.innerText = t.noMatch;
                     statusSpan.style.color = 'red';
+                    hideLoadingBar(container);
 
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = 'javascript:void(0)';
@@ -916,6 +977,7 @@ function run() {
                 else {
                     statusSpan.innerText = t.error + (newValue.msg ? ': ' + newValue.msg : '');
                     statusSpan.style.color = 'red';
+                    hideLoadingBar(container);
                 }
 
                 if (newValue.status !== 'creating') {
@@ -927,12 +989,12 @@ function run() {
 
 
             setTimeout(() => {
-                if (handled || GM_getValue('chekin_response')?.status === 'creating') return;
+                if (handled || GM_getValue('chekin_response_' + targetRef)?.status === 'creating') return;
                 handler(null, null, { status: 'login_required' }, null);
             }, 20000);
 
             // Listen for response
-            const listenerId = GM_addValueChangeListener('chekin_response', handler);
+            const listenerId = GM_addValueChangeListener('chekin_response_' + targetRef, handler);
         };
 
         // Convert dd/mm/yyyy to yyyy-mm-dd for Chekin API
@@ -961,23 +1023,24 @@ function run() {
             };
 
             // Set creating status and register listener for result
-            GM_deleteValue('chekin_response');
-            GM_setValue('chekin_create_request', payload);
+            GM_deleteValue('chekin_response_' + targetRef);
+            GM_setValue('chekin_create_request_' + targetRef, payload);
 
             // Small delay to ensure the listener is registered before setting creating status
             setTimeout(() => {
-                GM_setValue('chekin_response', { status: 'creating' });
+                GM_setValue('chekin_response_' + targetRef, { status: 'creating' });
             }, 50);
 
             console.log('🏨 Launching Chekin Create:', payload);
 
             const statusSpan = container.querySelector('#chekin-status');
             const checkinLink = container.querySelector('#chekin-link');
-            statusSpan.innerHTML = '<span class="chekin-spinner">⏳</span> Creating reservation...';
+            statusSpan.innerHTML = '⏳ Creating reservation...';
             statusSpan.style.color = 'orange';
+            showLoadingBar(container, 'Creating reservation in Chekin...');
             checkinLink.style.display = 'none';
 
-            const createUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autocreate=true`;
+            const createUrl = `https://${CONFIG.CHEKIN_DOMAIN}/bookings?autocreate=true&ref=${encodeURIComponent(targetRef)}`;
             GM_openInTab(createUrl, { active: false, insert: true, setParent: true });
 
             // Listen for the creation result
@@ -988,6 +1051,7 @@ function run() {
                 if (newValue.status === 'created') {
                     statusSpan.innerHTML = '✅ Reservation created in Chekin!';
                     statusSpan.style.color = 'green';
+                    hideLoadingBar(container);
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = newValue.link;
                     checkinLink.innerText = t.viewInChekin;
@@ -999,6 +1063,7 @@ function run() {
                 } else if (newValue.status === 'error') {
                     statusSpan.innerHTML = '❌ Creation failed' + (newValue.msg ? ': ' + newValue.msg : '');
                     statusSpan.style.color = 'red';
+                    hideLoadingBar(container);
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = 'javascript:void(0)';
                     checkinLink.innerText = '🔄 Retry';
@@ -1008,19 +1073,21 @@ function run() {
                     };
                 } else if (newValue.status === 'login_required') {
                     renderLoginButton(container);
+                    hideLoadingBar(container);
                 }
 
                 GM_removeValueChangeListener(createListenerId);
                 createHandled = true;
             };
 
-            const createListenerId = GM_addValueChangeListener('chekin_response', createHandler);
+            const createListenerId = GM_addValueChangeListener('chekin_response_' + targetRef, createHandler);
 
             // Timeout after 30 seconds
             setTimeout(() => {
                 if (!createHandled) {
                     statusSpan.innerHTML = '❌ Creation timed out. Please try again.';
                     statusSpan.style.color = 'red';
+                    hideLoadingBar(container);
                     checkinLink.style.display = 'inline-block';
                     checkinLink.href = 'javascript:void(0)';
                     checkinLink.innerText = '🔄 Retry';
@@ -1035,14 +1102,17 @@ function run() {
 
         const renderLoginButton = (container) => {
             const statusSpan = container.querySelector('#chekin-status');
-            statusSpan.innerHTML = '';
+            if (statusSpan) statusSpan.innerHTML = '';
+
+            const existingBtn = container.querySelector('.btn-login-chekin');
+            if (existingBtn) existingBtn.remove();
 
             const btn = document.createElement('a');
-            btn.className = 'btn btn-danger';
+            btn.className = 'btn btn-danger btn-login-chekin';
             btn.innerText = t.loginRequired;
             btn.href = `https://${CONFIG.CHEKIN_DOMAIN}`;
             btn.target = '_blank';
-            btn.style.cssText = 'background: #d9534f; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;';
+            btn.style.cssText = 'display: block; width: fit-content; margin: 10px auto; background: #d9534f; color: white; padding: 8px 15px; text-decoration: none; border-radius: 5px; font-weight: bold;';
 
             btn.onclick = () => {
                 setTimeout(() => location.reload(), 5000);
@@ -1434,11 +1504,15 @@ function run() {
             const addAllBtn = container.querySelector('.fill-all-guests');
             if (addAllBtn) {
                 if (allFullyLoaded) {
-                    addAllBtn.className = 'btn btn-sm btn-default fill-all-guests';
-                    addAllBtn.innerHTML = `✅ ${t.allGuestsSavedBtn || 'All guests loaded'}`;
+                    addAllBtn.className = 'btn btn-sm btn-success fill-all-guests';
+                    const confirmText = LANG === 'es' ? 'Pulse Guardar para confirmar' : 'Press Save to confirm';
+                    addAllBtn.innerHTML = `✅ ${t.allGuestsSavedBtn || 'All guests loaded'} - ${confirmText}`;
                     addAllBtn.disabled = true;
-                    addAllBtn.style.opacity = '0.7';
-                    addAllBtn.style.cursor = 'not-allowed';
+                    addAllBtn.style.opacity = '1';
+                    addAllBtn.style.backgroundColor = '#28a745';
+                    addAllBtn.style.borderColor = '#28a745';
+                    addAllBtn.style.color = '#fff';
+                    addAllBtn.style.cursor = 'default';
                 } else {
                     addAllBtn.className = 'btn btn-sm btn-success fill-all-guests';
                     addAllBtn.innerHTML = t.fillAllGuestsBtn || 'Save All Guests';
@@ -1705,6 +1779,8 @@ function run() {
                 addAllBtn.onclick = async (evt) => {
                     evt.preventDefault();
 
+                    showLoadingBar(container, t.waitingPlease);
+
                     // 1. Cleanup duplicate "phantom" autofilled guests before filling!
                     const guestsContainerWrapper = document.getElementById('guests');
                     if (guestsContainerWrapper) {
@@ -1781,11 +1857,13 @@ function run() {
 
                     // 3. Fill forms sequentially
                     for (let i = 0; i < data.length; i++) {
+                        showLoadingBar(container, `${t.waitingPlease} (${i + 1}/${data.length})`);
                         await fillGuestForm(data[i], null);
                         // Wait for Vue/React re-render + province re-application (longest delay is 1500ms)
                         await new Promise(r => setTimeout(r, 2000));
                         updateGuestButtonsState(container, data);
                     }
+                    hideLoadingBar(container);
                 };
             }
 
@@ -1795,10 +1873,13 @@ function run() {
             fillButtons.forEach((btn, index) => {
                 btn.onclick = async (evt) => {
                     evt.preventDefault();
+                    showLoadingBar(container, t.waitingPlease);
                     await fillGuestForm(data[index], index);
                     // Wait for Vue re-render + province re-application (longest delay is 1500ms)
                     await new Promise(r => setTimeout(r, 2000));
                     updateGuestButtonsState(container, data);
+                    showLoadingBar(container, t.guestSavedBtn || 'Saved');
+                    setTimeout(() => hideLoadingBar(container), 3000);
                 };
             });
 
@@ -2180,7 +2261,7 @@ function run() {
             if (document.querySelector('input[type="password"]') ||
                 document.body.innerText.includes('Login') ||
                 document.body.innerText.includes('Sign in')) {
-                GM_setValue('chekin_response', { status: 'login_required' });
+                if (targetRef) GM_setValue('chekin_response_' + targetRef, { status: 'login_required' });
                 return true;
             }
             return false;
@@ -2188,7 +2269,7 @@ function run() {
 
         if (isAutoSearch) {
             // Validate request freshness
-            const request = GM_getValue('chekin_request');
+            const request = GM_getValue('chekin_request_' + targetRef);
             if (!request || (Date.now() - request.timestamp > 90000)) {
                 console.log('🚫 Request expired or not found');
                 return;
@@ -2197,7 +2278,7 @@ function run() {
 
         let createRequest = null;
         if (isAutoCreate) {
-            createRequest = GM_getValue('chekin_create_request');
+            createRequest = GM_getValue('chekin_create_request_' + targetRef);
             if (!createRequest || (Date.now() - createRequest.timestamp > 90000)) {
                 console.log('🚫 Create request expired or not found');
                 return;
@@ -2362,7 +2443,7 @@ function run() {
                 }
 
                 // Success
-                GM_setValue('chekin_response', {
+                GM_setValue('chekin_response_' + targetRef, {
                     status: 'created',
                     link: `https://dashboard.chekin.com/bookings/${createdData.id}`,
                     signupFormLink
@@ -2372,7 +2453,7 @@ function run() {
 
             } catch (err) {
                 console.error("Error creating reservation", err);
-                GM_setValue('chekin_response', { status: 'error', msg: err.message });
+                GM_setValue('chekin_response_' + targetRef, { status: 'error', msg: err.message });
                 setTimeout(() => window.close(), 3000);
             }
         };
@@ -2473,7 +2554,7 @@ function run() {
 
                         if (!targetReservation) {
                             console.warn(`No reservation found for rooms ${targetRooms.join(', ')} on ${targetDate}`);
-                            GM_setValue('chekin_response', { status: 'not_found' });
+                            GM_setValue('chekin_response_' + targetRef, { status: 'not_found' });
                             setTimeout(() => window.close(), 2000);
                             return;
                         }
@@ -2496,7 +2577,7 @@ function run() {
 
                         if (targetReservation.guests.startsWith("0/")) {
                             console.warn(`No guests registered yet for rooms ${targetRooms.join(', ')}`);
-                            GM_setValue('chekin_response', {
+                            GM_setValue('chekin_response_' + targetRef, {
                                 status: 'no_guests',
                                 link,
                                 signupFormLink
@@ -2541,7 +2622,7 @@ function run() {
                                 }));
 
                                 console.log('📝 Sending Guest Data:', guestData);
-                                GM_setValue('chekin_response', {
+                                GM_setValue('chekin_response_' + targetRef, {
                                     status: 'success',
                                     data: guestData,
                                     link,
@@ -2552,7 +2633,7 @@ function run() {
                             }
                         } catch (err) {
                             console.error('Error fetching guest details:', err);
-                            GM_setValue('chekin_response', { status: 'error', msg: err.message, link, signupFormLink });
+                            GM_setValue('chekin_response_' + targetRef, { status: 'error', msg: err.message, link, signupFormLink });
                         }
                     }
                 }).catch(err => console.error('Error reading JSON:', err));
