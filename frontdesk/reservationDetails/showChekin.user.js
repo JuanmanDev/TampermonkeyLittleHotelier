@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.4.3
+// @version      1.4.4
 // @description  Automate Checkin ID retrieval for Little Hotelier using fetch interception. Loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -931,6 +931,12 @@ function run() {
                 }
                 else if (newValue.status === 'login_required') {
                     renderLoginButton(container);
+                    hideLoadingBar(container);
+                }
+                else if (newValue.status === 'searching' || newValue.status === 'loading') {
+                    // Heartbeat received, reset timeout
+                    resetTimeout(45000);
+                    return; // Don't remove listener yet
                 }
                 else if (newValue.status === 'no_guests') {
                     statusSpan.innerHTML = `${t.noGuestsYet}`;
@@ -972,7 +978,17 @@ function run() {
                     statusSpan.innerHTML = '<span class="chekin-spinner">⏳</span> Creating reservation...';
                     statusSpan.style.color = 'orange';
                     checkinLink.style.display = 'none';
+                    resetTimeout(60000); // Give more time for creation
                     return; // Don't remove listener yet
+                }
+                else if (newValue.status === 'timeout') {
+                    statusSpan.innerText = '❌ Search timed out. Check if you are logged in to Chekin.';
+                    statusSpan.style.color = 'red';
+                    hideLoadingBar(container);
+
+                    checkinLink.style.display = 'inline-block';
+                    checkinLink.href = `https://${CONFIG.CHEKIN_DOMAIN}/bookings`;
+                    checkinLink.innerText = t.viewInChekin;
                 }
                 else {
                     statusSpan.innerText = t.error + (newValue.msg ? ': ' + newValue.msg : '');
@@ -980,18 +996,25 @@ function run() {
                     hideLoadingBar(container);
                 }
 
-                if (newValue.status !== 'creating') {
+                if (newValue.status !== 'creating' && newValue.status !== 'searching' && newValue.status !== 'loading') {
                     GM_removeValueChangeListener(listenerId);
                     handled = true;
+                    if (searchTimeout) clearTimeout(searchTimeout);
                 }
 
             }
 
 
-            setTimeout(() => {
-                if (handled || GM_getValue('chekin_response_' + targetRef)?.status === 'creating') return;
-                handler(null, null, { status: 'login_required' }, null);
-            }, 20000);
+            let searchTimeout;
+            const resetTimeout = (ms = 45000) => {
+                if (searchTimeout) clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => {
+                    if (handled || GM_getValue('chekin_response_' + targetRef)?.status === 'creating') return;
+                    handler(null, null, { status: 'timeout' }, null);
+                }, ms);
+            };
+
+            resetTimeout();
 
             // Listen for response
             const listenerId = GM_addValueChangeListener('chekin_response_' + targetRef, handler);
@@ -1955,6 +1978,25 @@ function run() {
 
         console.log('🔍 Chekin mode:', { isAutoSearch, isAutoCreate, isAutoBatchCheck, targetDate, targetRooms, targetRef });
 
+        // Start Heartbeat to keep LH tab alive
+        let heartbeatInterval;
+        if (targetRef && (isAutoSearch || isAutoCreate)) {
+            heartbeatInterval = setInterval(() => {
+                if (dataProcessed) {
+                    clearInterval(heartbeatInterval);
+                    return;
+                }
+                // Only send heartbeat if we haven't sent a final response yet
+                const currentResponse = GM_getValue('chekin_response_' + targetRef);
+                if (!currentResponse || currentResponse.status === 'searching' || currentResponse.status === 'loading') {
+                    GM_setValue('chekin_response_' + targetRef, {
+                        status: 'searching',
+                        timestamp: Date.now()
+                    });
+                }
+            }, 10000);
+        }
+
         // ====================================================================
         // BATCH CHECK MODE — Fetch all Chekin reservations for a date range
         // and return booking references to the calendar page
@@ -2258,9 +2300,16 @@ function run() {
 
         // Check login status
         const checkLoginStatus = () => {
-            if (document.querySelector('input[type="password"]') ||
-                document.body.innerText.includes('Login') ||
-                document.body.innerText.includes('Sign in')) {
+            // If we captured a token, we are definitively logged in
+            if (authToken) return false;
+
+            const hasPasswordInput = !!document.querySelector('input[type="password"]');
+            const hasLoginText = document.body.innerText.includes('Login') || document.body.innerText.includes('Sign in') || document.body.innerText.includes('Iniciar sesión');
+
+            // Look for elements that suggest we ARE in the dashboard
+            const hasDashboard = !!(document.querySelector('.bookings-list') || document.querySelector('nav') || document.querySelector('.v-application'));
+
+            if ((hasPasswordInput || hasLoginText) && !hasDashboard) {
                 if (targetRef) GM_setValue('chekin_response_' + targetRef, { status: 'login_required' });
                 return true;
             }
@@ -2643,10 +2692,13 @@ function run() {
         };
 
         unsafeWindow.fetch = newFetch;
-        // Check login after page loads
+        // Check login after page loads - give it more time to capture token
         setTimeout(() => {
-            if (checkLoginStatus()) return;
-        }, 5000);
+            if (checkLoginStatus()) {
+                if (heartbeatInterval) clearInterval(heartbeatInterval);
+                return;
+            }
+        }, 8000);
     }
 
 }
