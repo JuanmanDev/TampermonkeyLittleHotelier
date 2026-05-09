@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LH Front Desk - Ensure Reservation Save
 // @namespace    Hotelier Tools
-// @version      0.1.0
-// @description  Prevents closing the reservation edit modal if there are unsaved changes. Embeds the edit page in an iframe for a seamless experience.
+// @version      0.2.0
+// @description  Prevents closing the reservation edit modal if there are unsaved changes. Includes inactivity reminders with activity-based auto-dismiss.
 // @author       JuanmanDev
 // @match        https://application.littlehotelier.com/properties/*/calendar/*
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -12,6 +12,13 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_removeValueChangeListener
 // @run-at       document-idle
+
+
+// @homepageURL  https://github.com/JuanmanDev/TampermonkeyLittleHotelier/
+// @supportURL   https://github.com/JuanmanDev/TampermonkeyLittleHotelier/issues
+// @downloadURL  https://raw.githubusercontent.com/JuanmanDev/TampermonkeyLittleHotelier/main/frontdesk/reservationDetails/modalEnsureSave.user.js
+// @updateURL    https://raw.githubusercontent.com/JuanmanDev/TampermonkeyLittleHotelier/main/frontdesk/reservationDetails/modalEnsureSave.user.js
+
 // ==/UserScript==
 
 (function () {
@@ -36,6 +43,123 @@
 
         let lastState = null;
         let forceAllowClose = false;
+        let dirtyStartTime = null;
+        let lastNotifiedMinute = 0;
+
+        const TOAST_STYLE = `
+            .lh-toast {
+                position: fixed;
+                top: 120px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: #FF6842;
+                color: white;
+                padding: 20px 40px;
+                border-radius: 60px;
+                z-index: 100000;
+                box-shadow: 0 15px 45px rgba(0,0,0,0.4);
+                font-weight: bold;
+                display: flex;
+                align-items: center;
+                gap: 15px;
+                border: 3px solid white;
+                animation: lh-toast-in 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                font-family: sans-serif;
+                font-size: 22px;
+                white-space: nowrap;
+                user-select: none;
+            }
+            @keyframes lh-toast-in {
+                from { top: -120px; opacity: 0; }
+                to { top: 20px; opacity: 1; }
+            }
+            .lh-toast-out {
+                animation: lh-toast-out 0.5s ease-in forwards;
+            }
+            @keyframes lh-toast-out {
+                to { top: -120px; opacity: 0; }
+            }
+            .lh-toast-close {
+                cursor: pointer;
+                font-size: 28px;
+                line-height: 1;
+                margin-left: 15px;
+                opacity: 0.8;
+                transition: opacity 0.2s, transform 0.1s;
+            }
+            .lh-toast-close:hover { opacity: 1; transform: scale(1.1); }
+            .lh-toast-close:active { transform: scale(0.9); }
+        `;
+
+        const injectToastStyles = () => {
+            if (document.getElementById('lh-toast-styles')) return;
+            const style = document.createElement('style');
+            style.id = 'lh-toast-styles';
+            style.textContent = TOAST_STYLE;
+            document.head.appendChild(style);
+        };
+
+        const showReminderToast = (minutes) => {
+            injectToastStyles();
+
+            // Remove existing toast if any
+            const existing = document.querySelector('.lh-toast');
+            if (existing) existing.remove();
+
+            const toast = document.createElement('div');
+            toast.className = 'lh-toast';
+            toast.innerHTML = `
+                <span style="font-size: 30px;">⚠️</span>
+                <span>¡Atención! Lleva ${minutes} minutos con cambios sin guardar.</span>
+                <span class="lh-toast-close" title="Cerrar notification">×</span>
+            `;
+            document.body.appendChild(toast);
+
+            // Play notification sound (Repeats 3 times)
+            try {
+                const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+                let count = 0;
+                audio.volume = 0.5;
+                audio.play();
+                audio.addEventListener('ended', () => {
+                    if (count < 2) {
+                        count++;
+                        audio.play();
+                    }
+                });
+            } catch (e) {
+                console.warn('Could not play notification sound', e);
+            }
+
+            let removeTimeout = null;
+            const scheduleRemoval = () => {
+                if (removeTimeout) return;
+                console.log('📝 LH Ensure Save: Activity detected, scheduling toast removal in 20s');
+                removeTimeout = setTimeout(() => {
+                    if (toast.parentNode) {
+                        toast.classList.add('lh-toast-out');
+                        setTimeout(() => toast.remove(), 500);
+                    }
+                }, 20000);
+            };
+
+            const onActivity = () => {
+                scheduleRemoval();
+                window.removeEventListener('mousemove', onActivity);
+                window.removeEventListener('keydown', onActivity);
+            };
+
+            // Wait for activity to start the countdown
+            window.addEventListener('mousemove', onActivity);
+            window.addEventListener('keydown', onActivity);
+
+            toast.querySelector('.lh-toast-close').onclick = () => {
+                toast.classList.add('lh-toast-out');
+                setTimeout(() => toast.remove(), 500);
+                window.removeEventListener('mousemove', onActivity);
+                window.removeEventListener('keydown', onActivity);
+            };
+        };
 
         const updateState = () => {
             const saveBtn = document.querySelector('button.btn-controls');
@@ -46,19 +170,40 @@
                 lastState = state;
                 GM_setValue(`lh_save_state_${uuid}`, { state, timestamp: Date.now() });
                 console.log(`📝 LH Ensure Save: State changed to ${state}`);
+
+                if (state === 'DIRTY') {
+                    dirtyStartTime = Date.now();
+                    lastNotifiedMinute = 0;
+                } else {
+                    dirtyStartTime = null;
+                    const toast = document.querySelector('.lh-toast');
+                    if (toast) toast.remove();
+                }
+            }
+
+            if (state === 'DIRTY' && dirtyStartTime) {
+                const elapsedMinutes = Math.floor((Date.now() - dirtyStartTime) / 60000);
+                if (elapsedMinutes >= 15 && lastNotifiedMinute < 15) {
+                    showReminderToast(15);
+                    lastNotifiedMinute = 15;
+                } else if (elapsedMinutes >= 10 && lastNotifiedMinute < 10) {
+                    showReminderToast(10);
+                    lastNotifiedMinute = 10;
+                } else if (elapsedMinutes >= 5 && lastNotifiedMinute < 5) {
+                    showReminderToast(5);
+                    lastNotifiedMinute = 5;
+                }
             }
         };
 
         new MutationObserver(updateState).observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
         setInterval(updateState, 1500);
 
-        // Intercept close buttons inside the edit page
         document.addEventListener('click', (e) => {
             const closeBtn = e.target.closest('a.reservation-close, .reservation-modal-popup__header-close-button, .close-button');
             if (closeBtn) {
                 updateState();
                 if (lastState === 'DIRTY' && !forceAllowClose) {
-                    console.log('📝 LH Ensure Save: Changes detected on close attempt');
                     e.preventDefault();
                     e.stopPropagation();
                     if (isIframe) {
@@ -68,10 +213,8 @@
             }
         }, true);
 
-        // Safety for tab close
         window.addEventListener('beforeunload', (e) => {
             if (forceAllowClose) return;
-            // Re-check state one last time
             const saveBtn = document.querySelector('button.btn-controls');
             const isDirty = !!saveBtn && saveBtn.offsetParent !== null && (saveBtn.textContent.includes('Guardar') || saveBtn.textContent.includes('Save'));
             if (isDirty) {
@@ -88,9 +231,7 @@
                     saveBtn.click();
                 }
             } else if (newVal && newVal.action === 'FORCE_CLOSE') {
-                console.log('📝 LH Ensure Save: Force close signal received');
                 forceAllowClose = true;
-                // Also clear beforeunload manually just in case
                 window.onbeforeunload = null;
             }
         });
@@ -158,27 +299,17 @@
         };
 
         const closeModal = async () => {
-            console.log('📅 LH Ensure Save: Finalizing close');
-
             if (activeUuid) {
                 GM_setValue(`lh_save_command_${activeUuid}`, { action: 'FORCE_CLOSE', timestamp: Date.now() });
-                // Short delay to ensure message propagation to iframe before it's destroyed
                 await new Promise(r => setTimeout(r, 150));
             }
-
             const overlay = document.querySelector('.lh-iframe-modal-overlay');
             if (overlay) overlay.remove();
             document.body.style.overflow = '';
-
             isBypassing = true;
             const nativeCloseBtn = document.querySelector('.reservation-modal-popup__header-close-button');
-            if (nativeCloseBtn) {
-                nativeCloseBtn.click();
-            } else {
-                const backdrop = document.querySelector('.el-dialog__wrapper.reservation-modal-popup');
-                if (backdrop) backdrop.click();
-            }
-
+            if (nativeCloseBtn) nativeCloseBtn.click();
+            else { const b = document.querySelector('.el-dialog__wrapper.reservation-modal-popup'); if (b) b.click(); }
             activeUuid = null;
             isDirty = false;
             setTimeout(() => { isBypassing = false; }, 300);
@@ -186,20 +317,18 @@
 
         const attemptClose = () => {
             if (!activeUuid) {
-                const iframe = document.querySelector('.reservation-modal-popup iframe, .lh-iframe-modal-content');
-                if (iframe && iframe.src) activeUuid = getReservationUuidFromUrl(iframe.src);
+                const f = document.querySelector('.reservation-modal-popup iframe, .lh-iframe-modal-content');
+                if (f && f.src) activeUuid = getReservationUuidFromUrl(f.src);
                 else if (lastClickedUuid) activeUuid = lastClickedUuid;
             }
-
             if (activeUuid) {
-                const storedData = GM_getValue(`lh_save_state_${activeUuid}`);
-                if (storedData) isDirty = (storedData.state === 'DIRTY');
+                const d = GM_getValue(`lh_save_state_${activeUuid}`);
+                if (d) isDirty = (d.state === 'DIRTY');
             }
-
             if (isDirty) {
-                const confirmOverlay = document.createElement('div');
-                confirmOverlay.className = 'lh-confirm-overlay';
-                confirmOverlay.innerHTML = `
+                const o = document.createElement('div');
+                o.className = 'lh-confirm-overlay';
+                o.innerHTML = `
                     <div class="lh-confirm-box">
                         <h2>¿Guardar cambios en la reserva?</h2>
                         <p>Se han detectado cambios pendientes. ¿Qué desea hacer?</p>
@@ -210,20 +339,20 @@
                         </div>
                     </div>
                 `;
-                confirmOverlay.querySelector('.lh-confirm-btn-save').onclick = () => {
+                o.querySelector('.lh-confirm-btn-save').onclick = () => {
                     GM_setValue(`lh_save_command_${activeUuid}`, { action: 'SAVE', timestamp: Date.now() });
-                    const box = confirmOverlay.querySelector('.lh-confirm-box');
-                    box.innerHTML = `<h2>Guardando...</h2><p>Por favor espere unos segundos mientras se procesan los cambios.</p>`;
-                    let checks = 0;
-                    const itv = setInterval(() => {
-                        const data = GM_getValue(`lh_save_state_${activeUuid}`);
-                        if (data && data.state === 'CLEAN') { clearInterval(itv); confirmOverlay.remove(); closeModal(); }
-                        if (++checks > 30) { clearInterval(itv); box.innerHTML = `<h2>No se pudo confirmar el guardado</h2><p>Es posible que haya tardado demasiado. ¿Desea cerrar de todos modos?</p><div class="lh-confirm-options"><button class="lh-confirm-btn lh-confirm-btn-discard">Cerrar igual</button><button class="lh-confirm-btn lh-confirm-btn-back">Volver</button></div>`; box.querySelector('.lh-confirm-btn-discard').onclick = () => { confirmOverlay.remove(); isDirty = false; closeModal(); }; box.querySelector('.lh-confirm-btn-back').onclick = () => confirmOverlay.remove(); }
+                    const b = o.querySelector('.lh-confirm-box');
+                    b.innerHTML = `<h2>Guardando...</h2><p>Por favor espere...</p>`;
+                    let c = 0;
+                    const it = setInterval(() => {
+                        const d = GM_getValue(`lh_save_state_${activeUuid}`);
+                        if (d && d.state === 'CLEAN') { clearInterval(it); o.remove(); closeModal(); }
+                        if (++c > 30) { clearInterval(it); b.innerHTML = `<h2>Error</h2><div class="lh-confirm-options"><button class="lh-confirm-btn lh-confirm-btn-discard">Cerrar igual</button></div>`; b.querySelector('.lh-confirm-btn-discard').onclick = () => { o.remove(); isDirty = false; closeModal(); }; }
                     }, 200);
                 };
-                confirmOverlay.querySelector('.lh-confirm-btn-discard').onclick = () => { confirmOverlay.remove(); isDirty = false; closeModal(); };
-                confirmOverlay.querySelector('.lh-confirm-btn-back').onclick = () => confirmOverlay.remove();
-                document.body.appendChild(confirmOverlay);
+                o.querySelector('.lh-confirm-btn-discard').onclick = () => { o.remove(); isDirty = false; closeModal(); };
+                o.querySelector('.lh-confirm-btn-back').onclick = () => o.remove();
+                document.body.appendChild(o);
             } else {
                 closeModal();
             }
@@ -231,34 +360,33 @@
 
         window.addEventListener('click', (e) => {
             if (isBypassing) return;
-            const isClose = e.target.closest('.reservation-modal-popup__header-close-button');
-            const isBackdrop = e.target.classList.contains('el-dialog__wrapper') && e.target.classList.contains('reservation-modal-popup');
-            if (isClose || isBackdrop) { e.preventDefault(); e.stopPropagation(); attemptClose(); }
+            const c = e.target.closest('.reservation-modal-popup__header-close-button');
+            const b = e.target.classList.contains('el-dialog__wrapper') && e.target.classList.contains('reservation-modal-popup');
+            if (c || b) { e.preventDefault(); e.stopPropagation(); attemptClose(); }
         }, true);
 
         window.addEventListener('keydown', (e) => {
             if (isBypassing) return;
             if (e.key === 'Escape') {
-                const modal = document.querySelector('.reservation-modal-popup, .lh-iframe-modal-overlay');
-                if (modal && modal.offsetParent !== null) { e.preventDefault(); e.stopPropagation(); attemptClose(); }
+                const m = document.querySelector('.reservation-modal-popup, .lh-iframe-modal-overlay');
+                if (m && m.offsetParent !== null) { e.preventDefault(); e.stopPropagation(); attemptClose(); }
             }
         }, true);
 
         new MutationObserver(async () => {
-            const header = document.querySelector('.reservation-modal-popup__header');
-            if (!header || header.dataset.lhProcessed) return;
-            header.dataset.lhProcessed = 'true';
-            let foundUuid = null;
-            let attempts = 0;
-            while (attempts < 10 && !foundUuid) {
-                const iframe = document.querySelector('.reservation-modal-popup iframe');
-                if (iframe && iframe.src) foundUuid = getReservationUuidFromUrl(iframe.src);
-                const link = document.querySelector('.reservation-modal-popup a[href*="/reservations/"]');
-                if (link && link.href) foundUuid = getReservationUuidFromUrl(link.href);
-                if (!foundUuid) { attempts++; await new Promise(r => setTimeout(r, 300)); }
+            const h = document.querySelector('.reservation-modal-popup__header');
+            if (!h || h.dataset.lhProcessed) return;
+            h.dataset.lhProcessed = 'true';
+            let u = null; let a = 0;
+            while (a < 10 && !u) {
+                const i = document.querySelector('.reservation-modal-popup iframe');
+                if (i && i.src) u = getReservationUuidFromUrl(i.src);
+                const l = document.querySelector('.reservation-modal-popup a[href*="/reservations/"]');
+                if (l && l.href) u = getReservationUuidFromUrl(l.href);
+                if (!u) { a++; await new Promise(r => setTimeout(r, 300)); }
             }
-            if (!foundUuid) foundUuid = lastClickedUuid;
-            activeUuid = foundUuid;
+            if (!u) u = lastClickedUuid;
+            activeUuid = u;
             if (activeUuid) setupStateListener(activeUuid);
         }).observe(document.body, { childList: true, subtree: true });
     }
