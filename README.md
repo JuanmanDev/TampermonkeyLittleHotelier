@@ -1,5 +1,15 @@
 # Tampermonkey Scripts for Little Hotelier
 
+<br>
+
+## 💖 Apoya este proyecto
+Si este proyecto te ha sido útil, ¡considera apoyarlo!
+
+[![GitHub Sponsor](https://img.shields.io/badge/Sponsor-JuanmanDev-ea4aaa?style=for-the-badge&logo=github)](https://github.com/sponsors/JuanmanDev) [![Ko-fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/juanmandev) [![PayPal](https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/juanmandev)
+
+<br>
+
+
 Collection of Tampermonkey scripts that improve the visual experience and user interface of the Little Hotelier platform.
 
 ## What is this?
@@ -91,3 +101,13 @@ Este repositorio contiene scripts de usuario para la extensión Tampermonkey que
 ## Contribuciones
 
 Las contribuciones son bienvenidas. Si tienes ideas para mejorar estos scripts o añadir nuevos, no dudes en crear un pull request.
+
+
+<br>
+
+## 💖 Apoya este proyecto
+Si este proyecto te ha sido útil, ¡considera apoyarlo!
+
+[![GitHub Sponsor](https://img.shields.io/badge/Sponsor-JuanmanDev-ea4aaa?style=for-the-badge&logo=github)](https://github.com/sponsors/JuanmanDev) [![Ko-fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/juanmandev) [![PayPal](https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/juanmandev)
+
+<br>
