@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LH Front Desk - Show Chekin data for reservation
 // @namespace    Hotelier Tools
-// @version      1.5.0
+// @version      1.5.1
 // @description  Automate Checkin ID retrieval for Little Hotelier. Calls the Chekin API directly with the dashboard session (falls back to a background Chekin tab), loads Checkin guest data into reservation forms, preloads reservation data from the calendar view, and batch-checks for missing Chekin registrations.
 // @author       JuanmanDev
 // @match        https://app.littlehotelier.com/extranet/properties/*/reservations/*/edit*
@@ -147,8 +147,10 @@ function run() {
     // ========================================================================
     // SHARED: Chekin API client
     // The Chekin dashboard keeps a short-lived JWT (~1 hour) in localStorage.user.
-    // Any dashboard tab copies it into GM storage, so LH pages can call the API
-    // directly with GM_xmlhttpRequest. Without a fresh token, jobs run in a
+    // An expired token is NOT a logged-out session: POST /v3/api-token-refresh/
+    // with the old token returns a new one (that's how the dashboard stays logged in).
+    // Any dashboard tab copies its token into GM storage, so LH pages can call the API
+    // directly with GM_xmlhttpRequest. Without a usable token, jobs run in a
     // background dashboard tab instead (see runChekinJobInTab / CHEKIN WORKER).
     // ========================================================================
     const CHEKIN_API = 'https://a.chekin.io/api';
@@ -169,10 +171,46 @@ function run() {
     // Keep a margin so a job never starts with a token that expires mid-way
     const isTokenFresh = (token, marginMs = 2 * 60 * 1000) => !!token && getJwtExpiry(token) - marginMs > Date.now();
 
-    const getCachedChekinToken = () => {
-        const token = GM_getValue(CHEKIN_TOKEN_KEY, null);
-        return isTokenFresh(token) ? token : null;
+    // Store a token only if it outlives the cached one (dashboard tabs and LH refresh independently)
+    const storeChekinToken = (token) => {
+        if (token && getJwtExpiry(token) > getJwtExpiry(GM_getValue(CHEKIN_TOKEN_KEY, null))) {
+            GM_setValue(CHEKIN_TOKEN_KEY, token);
+        }
     };
+
+    // Exchange a (possibly expired) token for a new one. Resolves null when the session is really gone.
+    const refreshChekinToken = (token) => new Promise((resolve) => {
+        if (!token) return resolve(null);
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: CHEKIN_API + '/v3/api-token-refresh/',
+            headers: { 'accept': 'application/json', 'content-type': 'application/json' },
+            data: JSON.stringify({ token }),
+            timeout: 20000,
+            onload: (res) => {
+                let refreshed = null;
+                try {
+                    refreshed = res.status === 200 ? JSON.parse(res.responseText)?.token || null : null;
+                } catch (e) { /* not JSON */ }
+                if (refreshed) {
+                    storeChekinToken(refreshed);
+                    console.log('🔑 Chekin token refreshed');
+                } else {
+                    console.warn('🔑 Chekin token refresh rejected (HTTP ' + res.status + ')');
+                }
+                resolve(refreshed);
+            },
+            onerror: () => resolve(null),
+            ontimeout: () => resolve(null)
+        });
+    });
+
+    const ensureFreshToken = async (token) => {
+        if (!token) return null;
+        return isTokenFresh(token) ? token : refreshChekinToken(token);
+    };
+
+    const hasCachedChekinToken = () => !!GM_getValue(CHEKIN_TOKEN_KEY, null);
 
     const chekinRequest = (token, path, { method = 'GET', body = null } = {}) => new Promise((resolve, reject) => {
         GM_xmlhttpRequest({
@@ -537,18 +575,39 @@ function run() {
     });
 
     /**
+     * Run a job with a token, refreshing it first when expired and once more if the API rejects it.
+     * Throws an authError when the session can't be refreshed.
+     */
+    const runChekinJobWithToken = async (kind, token, params) => {
+        let current = await ensureFreshToken(token);
+        if (!current) {
+            const err = new Error('Chekin session expired');
+            err.authError = true;
+            throw err;
+        }
+        try {
+            return await CHEKIN_JOBS[kind](current, params);
+        } catch (err) {
+            if (!err.authError) throw err;
+            current = await refreshChekinToken(current);
+            if (!current) throw err;
+            return CHEKIN_JOBS[kind](current, params);
+        }
+    };
+
+    /**
      * Run a Chekin job directly with the cached token, or in a background tab when
-     * there is no fresh token. Always resolves with a { status, ... } object.
+     * there is no usable token. Always resolves with a { status, ... } object.
      */
     const runChekinJob = async (kind, params, options = {}) => {
-        const token = getCachedChekinToken();
+        const token = GM_getValue(CHEKIN_TOKEN_KEY, null);
         if (token) {
             try {
-                return await CHEKIN_JOBS[kind](token, params);
+                return await runChekinJobWithToken(kind, token, params);
             } catch (err) {
                 if (!err.authError) return { status: 'error', msg: err.message };
-                console.warn('🔑 Cached Chekin token rejected, falling back to a Chekin tab');
-                GM_deleteValue(CHEKIN_TOKEN_KEY);
+                console.warn('🔑 Cached Chekin session could not be refreshed, falling back to a Chekin tab');
+                if (GM_getValue(CHEKIN_TOKEN_KEY, null) === token) GM_deleteValue(CHEKIN_TOKEN_KEY);
             }
         }
         return runChekinJobInTab(kind, params, options);
@@ -876,7 +935,7 @@ function run() {
                             return;
                         }
                         // Logged out of Chekin: don't keep opening background tabs on every calendar move
-                        if (!getCachedChekinToken() && Date.now() - (window._chekinLoggedOutAt || 0) < 30 * 60 * 1000) {
+                        if (!hasCachedChekinToken() && Date.now() - (window._chekinLoggedOutAt || 0) < 30 * 60 * 1000) {
                             console.log('📅 Skipping Chekin auto-preload: Chekin session expired (log in to dashboard.chekin.com)');
                             return;
                         }
@@ -2280,10 +2339,12 @@ function run() {
         };
 
         // Share the dashboard session with LH pages, so they can call the Chekin API without opening tabs
+        // (an expired token is still worth sharing: it can be refreshed)
         const harvestToken = () => {
             const token = readDashboardToken();
-            if (isTokenFresh(token, 0) && token !== GM_getValue(CHEKIN_TOKEN_KEY, null)) {
-                GM_setValue(CHEKIN_TOKEN_KEY, token);
+            const before = GM_getValue(CHEKIN_TOKEN_KEY, null);
+            storeChekinToken(token);
+            if (GM_getValue(CHEKIN_TOKEN_KEY, null) !== before) {
                 console.log('🔑 Chekin session shared with Little Hotelier');
             }
             return token;
@@ -2306,11 +2367,13 @@ function run() {
         const resultKey = CHEKIN_RESULT_PREFIX + jobId;
         const closeSoon = (ms = 1500) => setTimeout(() => window.close(), ms);
 
-        // An expired session makes the dashboard redirect to chekin.com (where this script doesn't run),
-        // so detect it here, before the app gets the chance to navigate away.
-        const token = readDashboardToken();
-        if (!isTokenFresh(token, 30000)) {
-            console.warn('⚠️ Chekin session expired, login required');
+        // Without any token the dashboard redirects to chekin.com (where this script doesn't run),
+        // so answer right away. Expired tokens are refreshed by runChekinJobWithToken.
+        const dashboardToken = readDashboardToken();
+        const cachedToken = GM_getValue(CHEKIN_TOKEN_KEY, null);
+        const token = getJwtExpiry(cachedToken) > getJwtExpiry(dashboardToken) ? cachedToken : dashboardToken;
+        if (!token) {
+            console.warn('⚠️ No Chekin session, login required');
             GM_setValue(resultKey, { status: 'login_required' });
             closeSoon();
             return;
@@ -2321,7 +2384,7 @@ function run() {
             GM_setValue(resultKey, { status: 'working', timestamp: Date.now() });
         }, 10000);
 
-        CHEKIN_JOBS[job.kind](token, job.params)
+        runChekinJobWithToken(job.kind, token, job.params)
             .catch(err => {
                 console.error('❌ Chekin job failed', err);
                 return { status: err.authError ? 'login_required' : 'error', msg: err.message };
