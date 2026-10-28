@@ -36,7 +36,7 @@ This repository contains user scripts for the Tampermonkey extension that modify
 - **[Easy Save Province/Country](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/frontdesk/reservationDetails/easySaveProvinceCountry.user.js)**: Better selection of Province/Country for Spanish guests. Adds an easy selector for Spanish provinces and automatically sets the country to Spain.
 
 #### Calendar View
-- **[Prices Display](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/frontdesk/prices.user.js)**: Shows room prices in the Little Hotelier calendar view by fetching data from the inventory page.
+- **[Prices Display](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/frontdesk/prices.user.js)**: Shows each room type's daily rate in the "Unassigned" row of the calendar, and optionally the reservation total and a clear paid / partially paid / unpaid badge on every reservation. Options are in the calendar settings dialog (⚙️), under "Hotelier Tools".
 
 ### Direct Booking Scripts
 - **[Tables Full Width](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/directBooking/fullWidthTablets.user.js)**: Makes all tables in Direct Booking wider to display more information.
@@ -84,7 +84,7 @@ Este repositorio contiene scripts de usuario para la extensión Tampermonkey que
 - **[Guardado Fácil de Provincia/País](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/frontdesk/reservationDetails/easySaveProvinceCountry.user.js)**: Mejor selección de provincia y país para huéspedes españoles. Añade un selector para provincias españolas y establece automáticamente el país a España.
 
 #### Vista de Calendario
-- **[Visualización de Precios](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/frontdesk/prices.user.js)**: Muestra los precios de las habitaciones en la vista de calendario obteniendo datos de la página de inventario.
+- **[Visualización de Precios](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/frontdesk/prices.user.js)**: Muestra la tarifa diaria de cada tipo de habitación en la fila «No asignada» del calendario y, opcionalmente, el importe total de la reserva y una etiqueta clara de pagada / pago parcial / pendiente en cada reserva. Las opciones están en la configuración del calendario (⚙️), en «Hotelier Tools».
 
 ### Scripts de Direct Booking
 - **[Tablas a Ancho Completo](https://github.com/JuanmanDev/TampermonkeyLittleHotelier/blob/main/directBooking/fullWidthTablets.user.js)**: Hace que todas las tablas en Direct Booking sean más anchas para mostrar más información.
